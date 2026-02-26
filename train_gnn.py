@@ -51,7 +51,7 @@ class GNSLayer(MessagePassing):
 #This is the full encoder-processor-decoder model
 class GNSModel(nn.Module):
     def __init__(self, node_in_dim, edge_in_dim,
-                 latent_dim=128, num_layers=5):
+                 latent_dim=128, num_layers=1):
         super().__init__()
 
         # Encoder for Nodes (Two-layer MLPs with ReLU activations)
@@ -104,7 +104,6 @@ def build_dataset(Wall, traj_range,
 
     #Runs through each trajectory in the specified range
     for throw_number in traj_range:
-
         print(f"Processing trajectory {throw_number}")
 
         #Gets the graph features for the current trajectory
@@ -118,34 +117,22 @@ def build_dataset(Wall, traj_range,
 
         #Dimensions of the data
         T = node_feat.shape[0]
-        N = node_feat.shape[1]
+        assert all_positions.shape[0] == T, "node_feat and all_positions must be time-aligned"
 
-
-        # node_feat[..., :6] = [v_t, v_{t-1}]
-        #Gets the velocities at time t and t-1 to compute accelerations
-        v_t = node_feat[..., :3]
-        v_tm1 = node_feat[..., 3:6]
-
-        # Computes accelerations
-        acc = (v_t - v_tm1)  # (T, N, 3)
-
-        
-
-        # Builds a Data object for each time step in the trajectory
-        # Builds a Data object for each time step in the trajectory
-        for t in range(T - h):
-            pos_curr = all_positions[t + h]  # aligns with node_feat[t]
-            pos_prev = all_positions[t + h - 1]
+        # For each time t, predict a_t from features at t:
+        # a_t = x_{t+1} - 2 x_t + x_{t-1}
+        for t in range(1, T - 1):
+            y_t = all_positions[t + 1] - 2.0 * all_positions[t] + all_positions[t - 1]
 
             data = Data(
                 x=node_feat[t],
                 edge_index=edge_index,
                 edge_attr=edge_feat[t],
-                y=acc[t],         # make sure acceleration aligns with all_positions
-                pos_curr=pos_curr,
-                pos_prev=pos_prev
+                y=y_t,
+                pos_prev=all_positions[t - 1],
+                pos_curr=all_positions[t],
+                pos_next=all_positions[t + 1],
             )
-
             dataset.append(data)
 
     return dataset
@@ -162,7 +149,8 @@ def train_gnn(Wall,
               epochs=50,
               batch_size=8,
               lr=1e-4,
-              nodes_per_edge=5):
+              nodes_per_edge=5,
+              message_passing_layers=2):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -178,8 +166,8 @@ def train_gnn(Wall,
         print("Building test dataset...")
         #Test data set is just what's left over
         traj_range_test = range(num_trajectories_train+1, num_trajectories_train + num_trajectories_test+1)
-        test_dataset = build_dataset(Wall, traj_range_test, nodes_per_edge=nodes_per_edge)
-        torch.save(test_dataset, save_test_dataset_path)
+        dataset_test = build_dataset(Wall, traj_range_test, nodes_per_edge=nodes_per_edge)
+        torch.save(dataset_test, save_test_dataset_path)
         print(f"Test dataset saved to {save_test_dataset_path}")
 
     #Loads the training dataset
@@ -188,9 +176,19 @@ def train_gnn(Wall,
         dataset_train = torch.load(save_train_dataset_path, weights_only=False)
         print(f"Training dataset loaded from {save_train_dataset_path}")
         print("Loading test dataset...")
-        test_dataset = torch.load(save_test_dataset_path, weights_only=False)
+        dataset_test = torch.load(save_test_dataset_path, weights_only=False)
         print(f"Test dataset loaded from {save_test_dataset_path}")
 
+
+    # Min-max normalize acceleration targets using TRAIN stats only
+    acc_min, acc_max, acc_span = _compute_accel_minmax(dataset_train)
+    _apply_accel_minmax(dataset_train, acc_min, acc_span)
+    _apply_accel_minmax(dataset_test, acc_min, acc_span)
+
+    # Save normalization stats next to model
+    norm_stats_path = os.path.splitext(save_model_path)[0] + "_accel_minmax.pt"
+    torch.save({"acc_min": acc_min, "acc_max": acc_max}, norm_stats_path)
+    print(f"Saved accel min/max stats to {norm_stats_path}")
 
     loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
 
@@ -199,7 +197,7 @@ def train_gnn(Wall,
     edge_dim = dataset_train[0].edge_attr.shape[1]
 
     #Initializes the GNS model, optimizer, and loss function
-    model = GNSModel(node_dim, edge_dim).to(device)
+    model = GNSModel(node_dim, edge_dim, latent_dim=128, num_layers=message_passing_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
@@ -274,10 +272,21 @@ def train_gnn(Wall,
         avg_loss = total_loss / len(loader)
 
         #Prints epoch loss
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.6f}")
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.9f}")
 
     #Saves the trained model
     torch.save(model.state_dict(), save_model_path)
     print(f"Model saved to {save_model_path}")
 
     return model
+
+def _compute_accel_minmax(dataset):
+    y_all = torch.cat([d.y for d in dataset], dim=0)  # (total_nodes_over_all_samples, 3)
+    acc_min = y_all.min(dim=0).values
+    acc_max = y_all.max(dim=0).values
+    acc_span = (acc_max - acc_min).clamp_min(1e-8)
+    return acc_min, acc_max, acc_span
+
+def _apply_accel_minmax(dataset, acc_min, acc_span):
+    for d in dataset:
+        d.y = (d.y - acc_min) / acc_span

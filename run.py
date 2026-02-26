@@ -19,22 +19,24 @@ Num_train_trajectories = 512
 Num_test_trajectories = Num_total_trajectories - Num_train_trajectories
 
 nodes_per_edge = 2
+message_passing_layers = 3
 
 
 #Trains the GNN model
-# train_gnn.train_gnn(
-#     Floor, 
-#     num_trajectories_train=Num_train_trajectories, 
-#     num_trajectories_test=Num_test_trajectories,
-#     save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
-#     save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
-#     save_model_path="models/gns_model.pt", 
-#     rebuild_datasets=True,
-#     epochs=10, 
-#     batch_size=64, 
-#     lr=1e-4,
-#     nodes_per_edge=nodes_per_edge
-# )
+train_gnn.train_gnn(
+    Floor, 
+    num_trajectories_train=Num_train_trajectories, 
+    num_trajectories_test=Num_test_trajectories,
+    save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
+    save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
+    save_model_path="models/gns_model.pt", 
+    rebuild_datasets=True,
+    epochs=400, 
+    batch_size=64, 
+    lr=1e-4,
+    nodes_per_edge=nodes_per_edge,
+    message_passing_layers=message_passing_layers,
+)
 
 
 
@@ -44,10 +46,15 @@ node_dim = node_feat.shape[2]
 edge_dim = edge_feat.shape[2]
 
 #Load trained model
-model = GNSModel(node_dim, edge_dim)
+model = GNSModel(node_dim, edge_dim, latent_dim=128, num_layers=message_passing_layers)
 model.load_state_dict(torch.load("models/gns_model.pt", map_location=device))
 model.to(device)
 model.eval()
+
+# Load accel normalization stats
+norm_stats = torch.load("models/gns_model_accel_minmax.pt", map_location=device)
+accel_min = norm_stats["acc_min"]
+accel_max = norm_stats["acc_max"]
 
 
 #Runs a rollout on a test trajectory
@@ -62,7 +69,25 @@ display_results.display_meshed_cube(nodes_body)
 
 
 
-pred_positions, true_positions = display_results.rollout_trajectory(model, Floor, throw_number=0, nodes_per_edge=nodes_per_edge, rest_positions=nodes_body)  
+# pred_positions, true_positions = display_results.rollout_trajectory(
+#     model,
+#     Floor,
+#     throw_number=0,
+#     nodes_per_edge=nodes_per_edge,
+#     rest_positions=nodes_body,
+#     accel_min=accel_min,
+#     accel_max=accel_max
+# )  
+
+pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
+    model,
+    Floor,
+    throw_number=0,
+    nodes_per_edge=nodes_per_edge,
+    rest_positions=nodes_body,
+    accel_min=accel_min,
+    accel_max=accel_max
+)  
 
 #Animates the results
-display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/pen_and_Vel_loss_func_rollout.gif") 
+display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/pen_and_Vel_loss_func_rollout.gif")

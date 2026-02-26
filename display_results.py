@@ -60,45 +60,134 @@ def shape_match(pred_positions, rest_positions, masses=None, alpha=1.0):
 # -----------------------------
 # Run predictions & rollout
 # -----------------------------
-def rollout_trajectory(model, Wall, throw_number, nodes_per_edge=5, h=2, rest_positions=None):
-    node_feat, edge_feat, edge_index, true_positions  = get_gns_features(Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h)
+def rollout_trajectory(model, Wall, throw_number, nodes_per_edge=5, h=2, rest_positions=None, accel_min=None, accel_max=None):
+    node_feat, edge_feat, edge_index, true_positions = get_gns_features(
+        Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h
+    )
     edge_index = edge_index.long()
-    
+
     predictions = []
-    
+
+    if accel_min is not None and accel_max is not None:
+        accel_min = accel_min.to(device)
+        accel_max = accel_max.to(device)
+        accel_span = (accel_max - accel_min).clamp_min(1e-8)
+
     for t in range(node_feat.shape[0]):
         data = torch_geometric.data.Data(
             x=node_feat[t],
             edge_index=edge_index,
             edge_attr=edge_feat[t]
-        )
-        data = data.to(device)
-        
+        ).to(device)
+
         with torch.no_grad():
-            acc_pred = model(data)
-        predictions.append(acc_pred.cpu())
-    
+            a_t = model(data)  # predicts acceleration at time t
+
+        if accel_min is not None and accel_max is not None:
+            a_t = a_t * accel_span + accel_min
+
+        predictions.append(a_t.cpu())
+
     predictions = torch.stack(predictions)
-    
-    # ------------------------------
-    # Correct Euler rollout
-    # ------------------------------
-    pred_positions = [true_positions[0], true_positions[1]]  # use positions, not velocities
-    for t in range(2, true_positions.shape[0]):
+
+    # Seed with x_0, x_1 (already aligned to returned true_positions timeline)
+    pred_positions = [true_positions[0], true_positions[1]]
+
+    # Use a_t to compute x_{t+1}
+    for t in range(1, true_positions.shape[0] - 1):
         x_prev = pred_positions[-2]
         x_curr = pred_positions[-1]
-        a_pred = predictions[t-2]  # predicted acceleration
-        
-        x_next = 2*x_curr - x_prev + a_pred*(DT**2)  # Euler integration
+        a_t = predictions[t]
 
-        # x_next[:, 2] = torch.clamp(x_next[:, 2], min=0)
+        x_next = a_t + 2.0 * x_curr - x_prev
+        if rest_positions is not None:
+            x_next = shape_match(x_next, rest_positions, alpha=0.9)
+
         pred_positions.append(x_next)
 
-        pred_positions[-1] = shape_match(pred_positions[-1], rest_positions, alpha=0.9)
-    
     pred_positions = torch.stack(pred_positions)
-    
     return pred_positions, true_positions
+
+# -----------------------------
+# Run predictions & rollout with feedback
+# -----------------------------
+def rollout_trajectory_feedback_shape_match(
+    model,
+    Wall,
+    throw_number,
+    nodes_per_edge=5,
+    h=2,
+    rest_positions=None,
+    accel_min=None,
+    accel_max=None,
+    shape_alpha=0.9
+):
+    """
+    Closed-loop rollout:
+      1) predict a_t from current predicted state
+      2) integrate x_{t+1} = a_t + 2 x_t - x_{t-1}
+      3) shape-match x_{t+1}
+      4) feed updated positions into next step feature construction
+    """
+    node_feat, edge_feat, edge_index, true_positions = get_gns_features(
+        Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h
+    )
+
+    edge_index = edge_index.long().to(device)
+    true_positions = true_positions.to(device)
+    node_dim_target = node_feat.shape[-1]
+    edge_dim_target = edge_feat.shape[-1]
+
+    if rest_positions is None:
+        rest_positions = true_positions[0].clone()
+    rest_positions = rest_positions.to(device)
+
+    if accel_min is not None and accel_max is not None:
+        accel_min = accel_min.to(device)
+        accel_max = accel_max.to(device)
+        accel_span = (accel_max - accel_min).clamp_min(1e-8)
+
+    # Need 3 frames for h=2 finite-difference velocity history
+    if true_positions.shape[0] < 3:
+        raise ValueError("Need at least 3 frames for feedback rollout with h=2.")
+
+    pred_positions = [
+        true_positions[0].clone(),
+        true_positions[1].clone(),
+        true_positions[2].clone(),
+    ]
+
+    # Build/predict from t=2 -> predict x_{3}, then onward
+    for _ in range(2, true_positions.shape[0] - 1):
+        x_tm2 = pred_positions[-3]
+        x_tm1 = pred_positions[-2]
+        x_t = pred_positions[-1]
+
+        x_node, e_attr = _build_feedback_features(
+            x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
+            node_dim_target=node_dim_target,
+            edge_dim_target=edge_dim_target
+        )
+
+        data = torch_geometric.data.Data(
+            x=x_node,
+            edge_index=edge_index,
+            edge_attr=e_attr
+        ).to(device)
+
+        with torch.no_grad():
+            a_t = model(data)
+
+        if accel_min is not None and accel_max is not None:
+            a_t = a_t * accel_span + accel_min
+
+        x_next = a_t + 2.0 * x_t - x_tm1
+        x_next = shape_match(x_next, rest_positions, alpha=shape_alpha)
+
+        pred_positions.append(x_next)
+
+    pred_positions = torch.stack(pred_positions, dim=0).cpu()
+    return pred_positions, true_positions.cpu()
 
 # -----------------------------
 # Plot RMSE
@@ -199,3 +288,53 @@ def display_meshed_cube(points):
     ax.set_zlabel('Z')
     ax.set_title('Meshed Cube Surface Points')
     plt.show()
+
+def _match_feature_dim(feat, target_dim):
+    """Pad/truncate feature dimension to match trained model input size."""
+    d = feat.shape[-1]
+    if d == target_dim:
+        return feat
+    if d < target_dim:
+        pad = torch.zeros(feat.shape[0], target_dim - d, device=feat.device, dtype=feat.dtype)
+        return torch.cat([feat, pad], dim=-1)
+    return feat[:, :target_dim]
+
+
+def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
+                             node_dim_target, edge_dim_target):
+    """
+    Build node/edge features from predicted positions for closed-loop rollout.
+    Node base: [v_t, v_{t-1}, boundary_dist]
+    Edge base: [d_ij, ||d_ij||, dU_ij, ||dU_ij||]
+    """
+    # Node features
+    v_t = x_t - x_tm1
+    v_tm1 = x_tm1 - x_tm2
+
+    if Wall is not None:
+        wall_n = torch.as_tensor(Wall.get_normal(), dtype=x_t.dtype, device=x_t.device)
+        wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
+        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True)
+        b = torch.clamp(b, 0.0, 0.5)
+        x_node = torch.cat([v_t, v_tm1, b], dim=-1)
+    else:
+        x_node = torch.cat([v_t, v_tm1], dim=-1)
+
+    x_node = _match_feature_dim(x_node, node_dim_target)
+
+    # Edge features
+    src, dst = edge_index[0], edge_index[1]
+    d = x_t[src] - x_t[dst]
+    d_norm = torch.norm(d, dim=-1, keepdim=True)
+
+    if rest_positions is not None:
+        d_u = rest_positions[src] - rest_positions[dst]
+        d_u_norm = torch.norm(d_u, dim=-1, keepdim=True)
+    else:
+        d_u = torch.zeros_like(d)
+        d_u_norm = torch.zeros_like(d_norm)
+
+    e_attr = torch.cat([d, d_norm, d_u, d_u_norm], dim=-1)
+    e_attr = _match_feature_dim(e_attr, edge_dim_target)
+
+    return x_node, e_attr
