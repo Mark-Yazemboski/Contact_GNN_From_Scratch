@@ -15,10 +15,11 @@ Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
 
 #Sets number of trajectories for training and testing
 Num_total_trajectories = 569
-Num_train_trajectories = 550
+Num_train_trajectories = 512
 Num_test_trajectories = Num_total_trajectories - Num_train_trajectories
 
-nodes_per_edge = 5
+nodes_per_edge = 2
+
 
 #Trains the GNN model
 # train_gnn.train_gnn(
@@ -28,9 +29,10 @@ nodes_per_edge = 5
 #     save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
 #     save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
 #     save_model_path="models/gns_model.pt", 
-#     epochs=30, 
-#     batch_size=100, 
-#     lr=5e-4,
+#     rebuild_datasets=True,
+#     epochs=10, 
+#     batch_size=64, 
+#     lr=1e-4,
 #     nodes_per_edge=nodes_per_edge
 # )
 
@@ -53,7 +55,14 @@ nodes_body = torch.tensor(
         generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
         dtype=torch.float32
     )
-pred_positions, true_positions = display_results.rollout_trajectory(model, Floor, throw_number=0, rest_positions=nodes_body)  
+
+display_results.display_meshed_cube(nodes_body)
+
+
+
+
+
+pred_positions, true_positions = display_results.rollout_trajectory(model, Floor, throw_number=0, nodes_per_edge=nodes_per_edge, rest_positions=nodes_body)  
 
 #Animates the results
-display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/pen_loss_func_rollout.gif") 
+display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/pen_and_Vel_loss_func_rollout.gif") 

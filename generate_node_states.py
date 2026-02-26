@@ -157,7 +157,7 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, 
         v_fd = []
 
         for k in range(h):
-            v = (all_positions[t-k] - all_positions[t-k-1]) / DT
+            v = (all_positions[t-k] - all_positions[t-k-1])
             v_fd.append(v)
 
         v_fd = torch.cat(v_fd, dim=1)  # (N, 3h)

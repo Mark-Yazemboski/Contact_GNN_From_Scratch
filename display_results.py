@@ -60,8 +60,8 @@ def shape_match(pred_positions, rest_positions, masses=None, alpha=1.0):
 # -----------------------------
 # Run predictions & rollout
 # -----------------------------
-def rollout_trajectory(model, Wall, throw_number, h=2, rest_positions=None):
-    node_feat, edge_feat, edge_index, true_positions  = get_gns_features(Wall, throw_number, h=h)
+def rollout_trajectory(model, Wall, throw_number, nodes_per_edge=5, h=2, rest_positions=None):
+    node_feat, edge_feat, edge_index, true_positions  = get_gns_features(Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h)
     edge_index = edge_index.long()
     
     predictions = []
@@ -84,14 +84,12 @@ def rollout_trajectory(model, Wall, throw_number, h=2, rest_positions=None):
     # Correct Euler rollout
     # ------------------------------
     pred_positions = [true_positions[0], true_positions[1]]  # use positions, not velocities
-    print("Mean Z position of last 10 timesteps in prediction:")
-    print(predictions[-10:, :, 2].mean())
     for t in range(2, true_positions.shape[0]):
         x_prev = pred_positions[-2]
         x_curr = pred_positions[-1]
         a_pred = predictions[t-2]  # predicted acceleration
         
-        x_next = 2*x_curr - x_prev + a_pred * DT**2
+        x_next = 2*x_curr - x_prev + a_pred*(DT**2)  # Euler integration
 
         # x_next[:, 2] = torch.clamp(x_next[:, 2], min=0)
         pred_positions.append(x_next)
@@ -138,8 +136,7 @@ def animate_cube(pred_positions, true_positions=None, interval=50, save_path=Non
     x_min, x_max = pred_positions[:, :, 0].min(), pred_positions[:, :, 0].max()
     y_min, y_max = pred_positions[:, :, 1].min(), pred_positions[:, :, 1].max()
     z_min, z_max = pred_positions[:, :, 2].min(), pred_positions[:, :, 2].max()
-
-    ax.set_box_aspect([1, 1, 1])
+    
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     ax.set_zlim(z_min, z_max)
@@ -184,9 +181,21 @@ def animate_cube(pred_positions, true_positions=None, interval=50, save_path=Non
     # -------------------------
     # Optional Save
     # -------------------------
+    ax.set_aspect('equal')
     if save_path is not None:
         print(f"Saving animation to {save_path}...")
         ani.save(save_path, writer='pillow', fps=1000 // interval)
         print("Saved successfully.")
+    
+    plt.show()
 
+
+def display_meshed_cube(points):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='r')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Meshed Cube Surface Points')
     plt.show()

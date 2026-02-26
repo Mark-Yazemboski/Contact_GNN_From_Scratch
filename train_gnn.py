@@ -22,14 +22,14 @@ class GNSLayer(MessagePassing):
         # Edge MLP
         self.edge_mlp = nn.Sequential(
             nn.Linear(3 * latent_dim, latent_dim),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Linear(latent_dim, latent_dim)
         )
 
         # Node MLP
         self.node_mlp = nn.Sequential(
             nn.Linear(2 * latent_dim, latent_dim),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Linear(latent_dim, latent_dim)
         )
 
@@ -54,17 +54,17 @@ class GNSModel(nn.Module):
                  latent_dim=128, num_layers=5):
         super().__init__()
 
-        # Encoder for Nodes (Two-layer MLPs with PreLU activations)
+        # Encoder for Nodes (Two-layer MLPs with ReLU activations)
         self.node_encoder = nn.Sequential(
             nn.Linear(node_in_dim, latent_dim),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Linear(latent_dim, latent_dim)
         )
 
-        # Encoder for Edges (Two-layer MLPs with PreLU activations)
+        # Encoder for Edges (Two-layer MLPs with ReLU activations)
         self.edge_encoder = nn.Sequential(
             nn.Linear(edge_in_dim, latent_dim),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Linear(latent_dim, latent_dim)
         )
 
@@ -74,10 +74,10 @@ class GNSModel(nn.Module):
             layer = GNSLayer(latent_dim)
             self.processor.append(layer)
 
-        # Decoder for Nodes (Two-layer MLPs with PreLU activations)
+        # Decoder for Nodes (Two-layer MLPs with ReLU activations)
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
-            nn.PReLU(),
+            nn.ReLU(),
             nn.Linear(latent_dim, 3)
         )
 
@@ -127,7 +127,7 @@ def build_dataset(Wall, traj_range,
         v_tm1 = node_feat[..., 3:6]
 
         # Computes accelerations
-        acc = (v_t - v_tm1) / DT  # (T, N, 3)
+        acc = (v_t - v_tm1)  # (T, N, 3)
 
         
 
@@ -158,6 +158,7 @@ def train_gnn(Wall,
               save_train_dataset_path,
               save_test_dataset_path,
               save_model_path,
+              rebuild_datasets = False,
               epochs=50,
               batch_size=8,
               lr=1e-4,
@@ -165,23 +166,32 @@ def train_gnn(Wall,
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    #BUILDS TRAINING DATASET
-    print("Building training dataset...")
-    traj_range_train = range(num_trajectories_train)
-    dataset_train = build_dataset(Wall, traj_range_train,nodes_per_edge=nodes_per_edge)
-    torch.save(dataset_train, save_train_dataset_path)
-    print(f"Dataset saved to {save_train_dataset_path}")
+    if rebuild_datasets:
+        #BUILDS TRAINING DATASET
+        print("Building training dataset...")
+        traj_range_train = range(num_trajectories_train)
+        dataset_train = build_dataset(Wall, traj_range_train,nodes_per_edge=nodes_per_edge)
+        torch.save(dataset_train, save_train_dataset_path)
+        print(f"Dataset saved to {save_train_dataset_path}")
 
-    #BUILDS TEST DATASET
-    print("Building test dataset...")
-    #Test data set is just what's left over
-    traj_range_test = range(num_trajectories_train+1, num_trajectories_train + num_trajectories_test+1)
-    test_dataset = build_dataset(Wall, traj_range_test, nodes_per_edge=nodes_per_edge)
-    torch.save(test_dataset, save_test_dataset_path)
-    print(f"Test dataset saved to {save_test_dataset_path}")
+        #BUILDS TEST DATASET
+        print("Building test dataset...")
+        #Test data set is just what's left over
+        traj_range_test = range(num_trajectories_train+1, num_trajectories_train + num_trajectories_test+1)
+        test_dataset = build_dataset(Wall, traj_range_test, nodes_per_edge=nodes_per_edge)
+        torch.save(test_dataset, save_test_dataset_path)
+        print(f"Test dataset saved to {save_test_dataset_path}")
 
     #Loads the training dataset
+    else:
+        print("Loading training dataset...")
+        dataset_train = torch.load(save_train_dataset_path, weights_only=False)
+        print(f"Training dataset loaded from {save_train_dataset_path}")
+        print("Loading test dataset...")
+        test_dataset = torch.load(save_test_dataset_path, weights_only=False)
+        print(f"Test dataset loaded from {save_test_dataset_path}")
+
+
     loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
 
     #Gets input dimensions from the first data point
@@ -196,6 +206,7 @@ def train_gnn(Wall,
     print("Starting training...")
 
     #Training loop
+    disp = True
     for epoch in range(epochs):
         
         #Resets total loss for the epoch
@@ -216,24 +227,41 @@ def train_gnn(Wall,
             pred_accel = model(batch)
 
             #Computes loss
-            floor_z = 0.0
-            lambda_floor = 10.0  # weight for the floor penalty
+            # floor_z = 0.0
+            # lambda_floor = 250000.0  # weight for the floor penalty
+            # lambda_velocity = 1000.0  # weight for the downward velocity penalty
 
-            x_curr = batch.pos_curr
-            x_prev = batch.pos_prev
-            pred_positions = 2 * x_curr - x_prev + pred_accel * DT**2
+            # x_curr = batch.pos_curr
+            # x_prev = batch.pos_prev
+            # pred_positions = 2 * x_curr - x_prev + pred_accel
 
-            # Compute how far each node is below the floor
-            floor_penalty = torch.relu(floor_z - pred_positions[:, 2])
-            floor_penalty_loss = (floor_penalty ** 2).mean()
+            # # Compute how far each node is below the floor
+            # floor_penalty = torch.relu(floor_z - pred_positions[:, 2])
+            # floor_penalty_loss = (abs(floor_penalty)).mean()
 
-            print(pred_accel.shape, batch.y.shape)
-            print(x_curr.shape, x_prev.shape, pred_positions.shape)
-            print(floor_penalty.min(), floor_penalty.max())
+            # v_pred = (pred_positions - x_curr)
+            # # Contact mask (only near or below floor)
+            # contact_mask = (pred_positions[:, 2] <= floor_z)
 
-            
-            loss = loss_fn(pred_accel, batch.y) + lambda_floor * floor_penalty_loss
-            # loss = loss_fn(pred, batch.y)
+            # # velocityz
+            # velocity_z = v_pred[:, 2]
+
+            # # Apply mask
+            # vel_violation = velocity_z * contact_mask.float()
+            # floor_velocity_loss = (vel_violation ** 2).mean()
+
+            # if epoch == 0 and disp:  # Print penalties for the first batch of the first epoch
+            #     print("Initial acceleration loss:", loss_fn(pred_accel, batch.y).item())
+            #     print("Initial floor penalty loss:", lambda_floor*floor_penalty_loss.item())
+            #     print("Initial floor velocity loss:", lambda_velocity*floor_velocity_loss.item())
+            #     disp = False
+
+            # print(pred_accel.shape, batch.y.shape)
+            # print(x_curr.shape, x_prev.shape, pred_positions.shape)
+            # print(floor_penalty.min(), floor_penalty.max())
+
+            # loss = loss_fn(pred_accel, batch.y) + lambda_floor * floor_penalty_loss  + lambda_velocity * floor_velocity_loss
+            loss = loss_fn(pred_accel, batch.y)
 
             #Backpropagation and optimization step
             loss.backward()
