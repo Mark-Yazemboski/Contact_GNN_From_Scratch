@@ -103,7 +103,22 @@ def quat_to_rotmat(q):
     return R
 
 
-def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, h=2):
+def add_random_walk_noise(positions, noise_scale=3e-4):
+    
+    noisy = positions.clone()
+    T, N, _ = positions.shape
+
+    noise = torch.zeros(N, 3, device=positions.device)
+
+    for t in range(T):
+        step_noise = torch.randn(N, 3, device=positions.device) * noise_scale
+        noise = noise + step_noise
+        noisy[t] = noisy[t] + noise
+
+    return noisy
+
+
+def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, h=2, training=False):
     """
     Returns:
         node_features: (T-h, N, 3h+1)
@@ -147,6 +162,9 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, 
         all_positions.append(nodes_world)
 
     all_positions = torch.stack(all_positions)  # (T,N,3)
+
+    if training:
+        all_positions = add_random_walk_noise(all_positions)
 
     node_features = []
     edge_features = []

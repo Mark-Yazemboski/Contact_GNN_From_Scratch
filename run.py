@@ -15,28 +15,31 @@ Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
 
 #Sets number of trajectories for training and testing
 Num_total_trajectories = 569
-Num_train_trajectories = 512
+Num_train_trajectories = 256
 Num_test_trajectories = Num_total_trajectories - Num_train_trajectories
 
 nodes_per_edge = 2
 message_passing_layers = 3
 
 
+Train = False
+
 #Trains the GNN model
-train_gnn.train_gnn(
-    Floor, 
-    num_trajectories_train=Num_train_trajectories, 
-    num_trajectories_test=Num_test_trajectories,
-    save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
-    save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
-    save_model_path="models/gns_model.pt", 
-    rebuild_datasets=True,
-    epochs=400, 
-    batch_size=64, 
-    lr=1e-4,
-    nodes_per_edge=nodes_per_edge,
-    message_passing_layers=message_passing_layers,
-)
+if Train:
+    train_gnn.train_gnn(
+        Floor, 
+        num_trajectories_train=Num_train_trajectories, 
+        num_trajectories_test=Num_test_trajectories,
+        save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
+        save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
+        save_model_path="models/gns_model.pt", 
+        rebuild_datasets=True,
+        epochs=100, 
+        batch_size=64, 
+        lr=1e-4,
+        nodes_per_edge=nodes_per_edge,
+        message_passing_layers=message_passing_layers,
+    )
 
 
 
@@ -52,9 +55,9 @@ model.to(device)
 model.eval()
 
 # Load accel normalization stats
-norm_stats = torch.load("models/gns_model_accel_minmax.pt", map_location=device)
-accel_min = norm_stats["acc_min"]
-accel_max = norm_stats["acc_max"]
+norm_stats = torch.load("models/gns_model_accel_norm.pt", map_location=device)
+accel_std = norm_stats["acc_std"]
+accel_mean = norm_stats["acc_mean"]
 
 
 #Runs a rollout on a test trajectory
@@ -82,11 +85,13 @@ display_results.display_meshed_cube(nodes_body)
 pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
     model,
     Floor,
-    throw_number=0,
+    throw_number=568,
     nodes_per_edge=nodes_per_edge,
     rest_positions=nodes_body,
-    accel_min=accel_min,
-    accel_max=accel_max
+    accel_std=accel_std,
+    accel_mean=accel_mean,
+    shape_alpha=1.0
+    
 )  
 
 #Animates the results

@@ -13,39 +13,79 @@ HZ = 144
 DT = 1.0 / HZ
 
 # Graph Network Simulator (GNS) Layer
-class GNSLayer(MessagePassing):
-    def __init__(self, latent_dim):
+class GNSLayer(nn.Module):
+    def __init__(self, node_dim, edge_dim, hidden_dim):
+        super().__init__()
 
-        #Sets the aggregation method to 'add', which means that messages from neighboring nodes will be summed together
-        super().__init__(aggr='add')
-
-        # Edge MLP
+        # Edge update MLP
         self.edge_mlp = nn.Sequential(
-            nn.Linear(3 * latent_dim, latent_dim),
+            nn.Linear(node_dim * 2 + edge_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(latent_dim, latent_dim)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
         )
 
-        # Node MLP
+        # Node update MLP
         self.node_mlp = nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim),
+            nn.Linear(hidden_dim + node_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(latent_dim, latent_dim)
+            nn.Linear(hidden_dim, node_dim)
         )
 
-    # Forward step
+        # LayerNorm (important for stability)
+        self.edge_norm = nn.LayerNorm(hidden_dim)
+        self.node_norm = nn.LayerNorm(node_dim)
+
     def forward(self, x, edge_index, edge_attr):
-        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        """
+        x:           [num_nodes, node_dim]
+        edge_index:  [2, num_edges]
+                     edge_index[0] = senders
+                     edge_index[1] = receivers
+        edge_attr:   [num_edges, edge_dim]
+        """
 
-    #Passes the target and source node features along with edge attributes into the edge MLP to generate a message
-    def message(self, x_i, x_j, edge_attr):
-        m = torch.cat([x_i, x_j, edge_attr], dim=-1)
-        return self.edge_mlp(m)
+        senders = edge_index[0]
+        receivers = edge_index[1]
 
-    #Updates node features by concatenating the aggregated messages with the original node features and passing them through the node MLP
-    def update(self, aggr_out, x):
-        h = torch.cat([x, aggr_out], dim=-1)
-        return self.node_mlp(h)
+        # --------------------------------------------------
+        # 1️⃣ EDGE UPDATE
+        # --------------------------------------------------
+        sender_features = x[senders]
+        receiver_features = x[receivers]
+
+        edge_input = torch.cat(
+            [sender_features, receiver_features, edge_attr], dim=-1
+        )
+
+        edge_messages = self.edge_mlp(edge_input)
+        edge_messages = self.edge_norm(edge_messages)
+
+        # --------------------------------------------------
+        # 2️⃣ AGGREGATION (SUM over incoming edges)
+        # --------------------------------------------------
+        num_nodes = x.size(0)
+        hidden_dim = edge_messages.size(1)
+
+        node_agg = torch.zeros(
+            num_nodes, hidden_dim, device=x.device
+        )
+
+        node_agg.index_add_(0, receivers, edge_messages)
+
+        # --------------------------------------------------
+        # 3️⃣ NODE UPDATE
+        # --------------------------------------------------
+        node_input = torch.cat([x, node_agg], dim=-1)
+
+        node_update = self.node_mlp(node_input)
+
+        # Residual connection (VERY important)
+        x = x + node_update
+
+        x = self.node_norm(x)
+
+        return x
 
 
 #This is the full encoder-processor-decoder model
@@ -54,43 +94,47 @@ class GNSModel(nn.Module):
                  latent_dim=128, num_layers=1):
         super().__init__()
 
-        # Encoder for Nodes (Two-layer MLPs with ReLU activations)
+        # Node encoder
         self.node_encoder = nn.Sequential(
             nn.Linear(node_in_dim, latent_dim),
             nn.ReLU(),
-            nn.Linear(latent_dim, latent_dim)
+            nn.Linear(latent_dim, latent_dim),
+            nn.LayerNorm(latent_dim)
         )
 
-        # Encoder for Edges (Two-layer MLPs with ReLU activations)
+        # Edge encoder
         self.edge_encoder = nn.Sequential(
             nn.Linear(edge_in_dim, latent_dim),
             nn.ReLU(),
-            nn.Linear(latent_dim, latent_dim)
+            nn.Linear(latent_dim, latent_dim),
+            nn.LayerNorm(latent_dim)
         )
 
-        #Processor: This will run through multiple layers of the graph network using the GNSLayer defined above
         self.processor = nn.ModuleList()
-        for i in range(num_layers):
-            layer = GNSLayer(latent_dim)
-            self.processor.append(layer)
+        for _ in range(num_layers):
+            self.processor.append(
+                GNSLayer(
+                    node_dim=latent_dim,
+                    edge_dim=latent_dim,
+                    hidden_dim=latent_dim
+                )
+            )
 
-        # Decoder for Nodes (Two-layer MLPs with ReLU activations)
+        # Decoder (NO LayerNorm per paper)
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.ReLU(),
             nn.Linear(latent_dim, 3)
         )
 
-    # Forward pass through the entire model
     def forward(self, data):
         x = self.node_encoder(data.x)
         edge_attr = self.edge_encoder(data.edge_attr)
 
-        #adds the output of each GNS layer to the input (residual connection)
+        # Fully dynamic message passing
         for layer in self.processor:
-            x = x + layer(x, data.edge_index, edge_attr)
+            x = layer(x, data.edge_index, edge_attr)
 
-        #Decodes the final node features to produce the output (predicted accelerations)
         return self.decoder(x)
 
 
@@ -112,7 +156,8 @@ def build_dataset(Wall, traj_range,
             throw_number,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
-            h=h
+            h=h,
+            training=True
         )
 
         #Dimensions of the data
@@ -180,15 +225,17 @@ def train_gnn(Wall,
         print(f"Test dataset loaded from {save_test_dataset_path}")
 
 
-    # Min-max normalize acceleration targets using TRAIN stats only
-    acc_min, acc_max, acc_span = _compute_accel_minmax(dataset_train)
-    _apply_accel_minmax(dataset_train, acc_min, acc_span)
-    _apply_accel_minmax(dataset_test, acc_min, acc_span)
+    acc_mean, acc_std = _compute_accel_stats(dataset_train)
 
-    # Save normalization stats next to model
-    norm_stats_path = os.path.splitext(save_model_path)[0] + "_accel_minmax.pt"
-    torch.save({"acc_min": acc_min, "acc_max": acc_max}, norm_stats_path)
-    print(f"Saved accel min/max stats to {norm_stats_path}")
+    _apply_accel_normalization(dataset_train, acc_mean, acc_std)
+    _apply_accel_normalization(dataset_test, acc_mean, acc_std)
+
+    # Save stats
+    norm_stats_path = os.path.splitext(save_model_path)[0] + "_accel_norm.pt"
+    torch.save({"acc_mean": acc_mean, "acc_std": acc_std}, norm_stats_path)
+
+    print(f"Saved accel normalization stats to {norm_stats_path}")
+
 
     loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
 
@@ -224,41 +271,6 @@ def train_gnn(Wall,
             #Forward pass
             pred_accel = model(batch)
 
-            #Computes loss
-            # floor_z = 0.0
-            # lambda_floor = 250000.0  # weight for the floor penalty
-            # lambda_velocity = 1000.0  # weight for the downward velocity penalty
-
-            # x_curr = batch.pos_curr
-            # x_prev = batch.pos_prev
-            # pred_positions = 2 * x_curr - x_prev + pred_accel
-
-            # # Compute how far each node is below the floor
-            # floor_penalty = torch.relu(floor_z - pred_positions[:, 2])
-            # floor_penalty_loss = (abs(floor_penalty)).mean()
-
-            # v_pred = (pred_positions - x_curr)
-            # # Contact mask (only near or below floor)
-            # contact_mask = (pred_positions[:, 2] <= floor_z)
-
-            # # velocityz
-            # velocity_z = v_pred[:, 2]
-
-            # # Apply mask
-            # vel_violation = velocity_z * contact_mask.float()
-            # floor_velocity_loss = (vel_violation ** 2).mean()
-
-            # if epoch == 0 and disp:  # Print penalties for the first batch of the first epoch
-            #     print("Initial acceleration loss:", loss_fn(pred_accel, batch.y).item())
-            #     print("Initial floor penalty loss:", lambda_floor*floor_penalty_loss.item())
-            #     print("Initial floor velocity loss:", lambda_velocity*floor_velocity_loss.item())
-            #     disp = False
-
-            # print(pred_accel.shape, batch.y.shape)
-            # print(x_curr.shape, x_prev.shape, pred_positions.shape)
-            # print(floor_penalty.min(), floor_penalty.max())
-
-            # loss = loss_fn(pred_accel, batch.y) + lambda_floor * floor_penalty_loss  + lambda_velocity * floor_velocity_loss
             loss = loss_fn(pred_accel, batch.y)
 
             #Backpropagation and optimization step
@@ -280,13 +292,15 @@ def train_gnn(Wall,
 
     return model
 
-def _compute_accel_minmax(dataset):
-    y_all = torch.cat([d.y for d in dataset], dim=0)  # (total_nodes_over_all_samples, 3)
-    acc_min = y_all.min(dim=0).values
-    acc_max = y_all.max(dim=0).values
-    acc_span = (acc_max - acc_min).clamp_min(1e-8)
-    return acc_min, acc_max, acc_span
+def _compute_accel_stats(dataset):
+    y_all = torch.cat([d.y for d in dataset], dim=0)
 
-def _apply_accel_minmax(dataset, acc_min, acc_span):
+    acc_mean = y_all.mean(dim=0)
+    acc_std = y_all.std(dim=0).clamp_min(1e-8)
+
+    return acc_mean, acc_std
+
+
+def _apply_accel_normalization(dataset, acc_mean, acc_std):
     for d in dataset:
-        d.y = (d.y - acc_min) / acc_span
+        d.y = (d.y - acc_mean) / acc_std

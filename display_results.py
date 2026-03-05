@@ -57,56 +57,6 @@ def shape_match(pred_positions, rest_positions, masses=None, alpha=1.0):
     new_positions = pred_positions + alpha * (g - pred_positions)
     return new_positions
 
-# -----------------------------
-# Run predictions & rollout
-# -----------------------------
-def rollout_trajectory(model, Wall, throw_number, nodes_per_edge=5, h=2, rest_positions=None, accel_min=None, accel_max=None):
-    node_feat, edge_feat, edge_index, true_positions = get_gns_features(
-        Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h
-    )
-    edge_index = edge_index.long()
-
-    predictions = []
-
-    if accel_min is not None and accel_max is not None:
-        accel_min = accel_min.to(device)
-        accel_max = accel_max.to(device)
-        accel_span = (accel_max - accel_min).clamp_min(1e-8)
-
-    for t in range(node_feat.shape[0]):
-        data = torch_geometric.data.Data(
-            x=node_feat[t],
-            edge_index=edge_index,
-            edge_attr=edge_feat[t]
-        ).to(device)
-
-        with torch.no_grad():
-            a_t = model(data)  # predicts acceleration at time t
-
-        if accel_min is not None and accel_max is not None:
-            a_t = a_t * accel_span + accel_min
-
-        predictions.append(a_t.cpu())
-
-    predictions = torch.stack(predictions)
-
-    # Seed with x_0, x_1 (already aligned to returned true_positions timeline)
-    pred_positions = [true_positions[0], true_positions[1]]
-
-    # Use a_t to compute x_{t+1}
-    for t in range(1, true_positions.shape[0] - 1):
-        x_prev = pred_positions[-2]
-        x_curr = pred_positions[-1]
-        a_t = predictions[t]
-
-        x_next = a_t + 2.0 * x_curr - x_prev
-        if rest_positions is not None:
-            x_next = shape_match(x_next, rest_positions, alpha=0.9)
-
-        pred_positions.append(x_next)
-
-    pred_positions = torch.stack(pred_positions)
-    return pred_positions, true_positions
 
 # -----------------------------
 # Run predictions & rollout with feedback
@@ -118,9 +68,9 @@ def rollout_trajectory_feedback_shape_match(
     nodes_per_edge=5,
     h=2,
     rest_positions=None,
-    accel_min=None,
-    accel_max=None,
-    shape_alpha=0.9
+    accel_std=None,
+    accel_mean=None,
+    shape_alpha=1.0
 ):
     """
     Closed-loop rollout:
@@ -141,11 +91,10 @@ def rollout_trajectory_feedback_shape_match(
     if rest_positions is None:
         rest_positions = true_positions[0].clone()
     rest_positions = rest_positions.to(device)
-
-    if accel_min is not None and accel_max is not None:
-        accel_min = accel_min.to(device)
-        accel_max = accel_max.to(device)
-        accel_span = (accel_max - accel_min).clamp_min(1e-8)
+    
+    if accel_std is not None and accel_mean is not None:
+        accel_std = accel_std.to(device)
+        accel_mean = accel_mean.to(device)
 
     # Need 3 frames for h=2 finite-difference velocity history
     if true_positions.shape[0] < 3:
@@ -178,8 +127,8 @@ def rollout_trajectory_feedback_shape_match(
         with torch.no_grad():
             a_t = model(data)
 
-        if accel_min is not None and accel_max is not None:
-            a_t = a_t * accel_span + accel_min
+        if accel_std is not None and accel_mean is not None:
+            a_t = a_t * accel_std + accel_mean
 
         x_next = a_t + 2.0 * x_t - x_tm1
         x_next = shape_match(x_next, rest_positions, alpha=shape_alpha)
