@@ -6,7 +6,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from generate_node_states import get_gns_features
 from torch_geometric.nn import MessagePassing
-
+import math
 
 #The Hz used in the collected data
 HZ = 144
@@ -92,22 +92,20 @@ class GNSModel(nn.Module):
 
         #Decodes the final node features to produce the output (predicted accelerations)
         return self.decoder(x)
+    
 
 
-#This function builds a dataset from multiple trajectories
+
 def build_dataset(Wall, traj_range,
                   nodes_per_edge=5,
                   nearest_neighbors=4,
                   h=2):
-
     dataset = []
 
-    #Runs through each trajectory in the specified range
     for throw_number in traj_range:
         print(f"Processing trajectory {throw_number}")
 
-        #Gets the graph features for the current trajectory
-        node_feat, edge_feat, edge_index, all_positions = get_gns_features(
+        node_feat, edge_feat, edge_index, clean_pos, noisy_pos = get_gns_features(
             Wall,
             throw_number,
             nodes_per_edge=nodes_per_edge,
@@ -115,27 +113,121 @@ def build_dataset(Wall, traj_range,
             h=h
         )
 
-        #Dimensions of the data
         T = node_feat.shape[0]
-        assert all_positions.shape[0] == T, "node_feat and all_positions must be time-aligned"
+        assert clean_pos.shape[0] == T, "node_feat and clean_pos must be time-aligned"
+        assert noisy_pos.shape[0] == T, "node_feat and noisy_pos must be time-aligned"
 
-        # For each time t, predict a_t from features at t:
-        # a_t = x_{t+1} - 2 x_t + x_{t-1}
         for t in range(1, T - 1):
-            y_t = all_positions[t + 1] - 2.0 * all_positions[t] + all_positions[t - 1]
+            pos_prev_clean = clean_pos[t - 1]
+            pos_curr_clean = clean_pos[t]
+            pos_next_clean = clean_pos[t + 1]
+
+            pos_prev = noisy_pos[t - 1]
+            pos_curr = noisy_pos[t]
+            pos_next = noisy_pos[t + 1]
+
+            y_t = pos_next_clean - 2.0 * pos_curr_clean + pos_prev_clean
+            
+            node_t = node_feat[t]
+            edge_t = edge_feat[t]
+
 
             data = Data(
-                x=node_feat[t],
+                x=node_t,
                 edge_index=edge_index,
-                edge_attr=edge_feat[t],
+                edge_attr=edge_t,
                 y=y_t,
-                pos_prev=all_positions[t - 1],
-                pos_curr=all_positions[t],
-                pos_next=all_positions[t + 1],
+                pos_prev=pos_prev,
+                pos_curr=pos_curr,
+                pos_next=pos_next,
             )
             dataset.append(data)
 
     return dataset
+
+
+def rotate_batch_trajectories(batch):
+    """
+    Applies a random rotation (around Z axis) independently
+    to each graph in a PyG batch.
+
+    Assumes:
+        - batch.x contains positions in [:,0:3] and maybe velocities [:,3:6]
+        - batch.y is acceleration (N,3)
+        - batch.edge_attr contains relative positions in [:,0:3]
+    """
+
+    if not hasattr(batch, "batch"):
+        # Single graph case
+        node_batch = torch.zeros(batch.x.size(0), 
+                                 dtype=torch.long, 
+                                 device=batch.x.device)
+    else:
+        node_batch = batch.batch
+
+    device = batch.x.device
+    num_graphs = int(node_batch.max().item()) + 1
+
+    # --------------------------------------------------
+    # 1️⃣  Sample one random angle per graph (ON GPU)
+    # --------------------------------------------------
+    thetas = (2.0 * math.pi) * torch.rand(num_graphs, device=device) - math.pi
+
+    # Assign each node its graph's angle
+    theta_per_node = thetas[node_batch]
+
+    # Precompute sin/cos
+    cos_t = torch.cos(theta_per_node)
+    sin_t = torch.sin(theta_per_node)
+
+    # --------------------------------------------------
+    # 2️⃣  Rotate NODE FEATURES
+    # --------------------------------------------------
+    def rotate_xy(v, cos_t, sin_t):
+        x = v[:, 0]
+        y = v[:, 1]
+
+        x_new = cos_t * x - sin_t * y
+        y_new = sin_t * x + cos_t * y
+
+        v[:, 0] = x_new
+        v[:, 1] = y_new
+        return v
+
+    # Positions
+    batch.x[:, 0:3] = rotate_xy(batch.x[:, 0:3], cos_t, sin_t)
+
+    # Velocities (if present)
+    if batch.x.size(1) >= 6:
+        batch.x[:, 3:6] = rotate_xy(batch.x[:, 3:6], cos_t, sin_t)
+
+    # Accelerations
+    batch.y = rotate_xy(batch.y, cos_t, sin_t)
+
+    # --------------------------------------------------
+    # 3️⃣  Rotate EDGE ATTRIBUTES
+    # --------------------------------------------------
+    # Need angle per edge
+    edge_batch = node_batch[batch.edge_index[0]]
+    theta_per_edge = thetas[edge_batch]
+
+    cos_e = torch.cos(theta_per_edge)
+    sin_e = torch.sin(theta_per_edge)
+
+    if batch.edge_attr.size(1) >= 3:
+        batch.edge_attr[:, 0:3] = rotate_xy(
+            batch.edge_attr[:, 0:3], cos_e, sin_e
+        )
+
+    # --------------------------------------------------
+    # 4️⃣  Rotate stored positions if present
+    # --------------------------------------------------
+    for attr in ["pos_prev", "pos_curr", "pos_next"]:
+        if hasattr(batch, attr):
+            v = getattr(batch, attr)
+            setattr(batch, attr, rotate_xy(v, cos_t, sin_t))
+
+    return batch
 
 
 #This function trains the GNS model
@@ -150,27 +242,23 @@ def train_gnn(Wall,
               batch_size=8,
               lr=1e-4,
               nodes_per_edge=5,
-              message_passing_layers=2):
+              message_passing_layers=2,
+              augment_data=False):
     
-    #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if rebuild_datasets:
-        #BUILDS TRAINING DATASET
         print("Building training dataset...")
         traj_range_train = range(num_trajectories_train)
-        dataset_train = build_dataset(Wall, traj_range_train,nodes_per_edge=nodes_per_edge)
+        dataset_train = build_dataset(Wall, traj_range_train, nodes_per_edge=nodes_per_edge)
         torch.save(dataset_train, save_train_dataset_path)
         print(f"Dataset saved to {save_train_dataset_path}")
 
-        #BUILDS TEST DATASET
         print("Building test dataset...")
-        #Test data set is just what's left over
         traj_range_test = range(num_trajectories_train+1, num_trajectories_train + num_trajectories_test+1)
         dataset_test = build_dataset(Wall, traj_range_test, nodes_per_edge=nodes_per_edge)
         torch.save(dataset_test, save_test_dataset_path)
         print(f"Test dataset saved to {save_test_dataset_path}")
 
-    #Loads the training dataset
     else:
         print("Loading training dataset...")
         dataset_train = torch.load(save_train_dataset_path, weights_only=False)
@@ -179,24 +267,20 @@ def train_gnn(Wall,
         dataset_test = torch.load(save_test_dataset_path, weights_only=False)
         print(f"Test dataset loaded from {save_test_dataset_path}")
 
-
-    # Min-max normalize acceleration targets using TRAIN stats only
-    acc_min, acc_max, acc_span = _compute_accel_minmax(dataset_train)
-    _apply_accel_minmax(dataset_train, acc_min, acc_span)
-    _apply_accel_minmax(dataset_test, acc_min, acc_span)
-
-    # Save normalization stats next to model
-    norm_stats_path = os.path.splitext(save_model_path)[0] + "_accel_minmax.pt"
-    torch.save({"acc_min": acc_min, "acc_max": acc_max}, norm_stats_path)
-    print(f"Saved accel min/max stats to {norm_stats_path}")
+    # --- REMOVED NORMALIZATION BLOCK ---
+    # acc_min, acc_max, acc_span = _compute_accel_minmax(dataset_test)
+    # _apply_accel_minmax(dataset_train, acc_min, acc_span)
+    # _apply_accel_minmax(dataset_test, acc_min, acc_span)
+    # norm_stats_path = os.path.splitext(save_model_path)[0] + "_accel_minmax.pt"
+    # torch.save({"acc_min": acc_min, "acc_max": acc_max}, norm_stats_path)
+    # print(f"Saved accel min/max stats to {norm_stats_path}")
+    # -----------------------------------
 
     loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
 
-    #Gets input dimensions from the first data point
     node_dim = dataset_train[0].x.shape[1]
     edge_dim = dataset_train[0].edge_attr.shape[1]
 
-    #Initializes the GNS model, optimizer, and loss function
     model = GNSModel(node_dim, edge_dim, latent_dim=128, num_layers=message_passing_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
@@ -217,6 +301,8 @@ def train_gnn(Wall,
 
             #Moves batch to the appropriate device
             batch = batch.to(device)
+            if augment_data:
+                batch = rotate_batch_trajectories(batch)
 
             #Zeroes the gradients
             optimizer.zero_grad()
@@ -279,14 +365,3 @@ def train_gnn(Wall,
     print(f"Model saved to {save_model_path}")
 
     return model
-
-def _compute_accel_minmax(dataset):
-    y_all = torch.cat([d.y for d in dataset], dim=0)  # (total_nodes_over_all_samples, 3)
-    acc_min = y_all.min(dim=0).values
-    acc_max = y_all.max(dim=0).values
-    acc_span = (acc_max - acc_min).clamp_min(1e-8)
-    return acc_min, acc_max, acc_span
-
-def _apply_accel_minmax(dataset, acc_min, acc_span):
-    for d in dataset:
-        d.y = (d.y - acc_min) / acc_span

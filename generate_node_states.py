@@ -103,12 +103,21 @@ def quat_to_rotmat(q):
     return R
 
 
-def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, h=2):
+def get_gns_features(
+    Wall,
+    throw_number,
+    nodes_per_edge=5,
+    nearest_neighbors=4,
+    h=2,
+    noise_scale=3e-4,
+):
     """
     Returns:
-        node_features: (T-h, N, 3h+1)
-        edge_features: (T-h, E, 8)
+        node_features: (T-h, N, 3h+1)   <-- computed from NOISY positions
+        edge_features: (T-h, E, 8)     <-- computed from NOISY positions
         edge_index: (2, E)
+        clean_positions: (T-h, N, 3)
+        noisy_positions: (T-h, N, 3)
     """
 
     data_path = f"data/tosses_processed/{throw_number}.pt"
@@ -116,26 +125,27 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, 
     unscaled_states = unscale_position_velocity(data[0].float())
     T = unscaled_states.shape[0]
 
-    # Build body mesh (undeformed mesh)
+    # --------------------------------------------------
+    # Build undeformed body mesh
+    # --------------------------------------------------
     nodes_body = torch.tensor(
-        mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
-        dtype=torch.float32
+        mesh_cube_surface(BLOCK_HALF_WIDTH * 2, nodes_per_edge),
+        dtype=torch.float32,
     )
 
     edge_index = knn_adjacency(nodes_body.numpy(), k=nearest_neighbors)
     edge_index = torch.tensor(edge_index, dtype=torch.long)
 
-    N = nodes_body.shape[0]
-    E = edge_index.shape[1]
-
-    # Precompute undeformed edge displacements dU_ij
     sender = edge_index[0]
     receiver = edge_index[1]
-    dU = nodes_body[sender] - nodes_body[receiver]       # (E,3)
-    dU_norm = torch.norm(dU, dim=1, keepdim=True)        # (E,1)
 
-    # Store world positions for all timesteps
-    all_positions = []
+    dU = nodes_body[sender] - nodes_body[receiver]
+    dU_norm = torch.norm(dU, dim=1, keepdim=True)
+
+    # --------------------------------------------------
+    # Compute CLEAN world positions
+    # --------------------------------------------------
+    clean_positions = []
 
     for t in range(T):
         state = unscaled_states[t]
@@ -144,41 +154,60 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, 
 
         R = quat_to_rotmat(quat)
         nodes_world = (R @ nodes_body.T).T + pos
-        all_positions.append(nodes_world)
+        clean_positions.append(nodes_world)
 
-    all_positions = torch.stack(all_positions)  # (T,N,3)
+    clean_positions = torch.stack(clean_positions)  # (T, N, 3)
 
+    # --------------------------------------------------
+    # Add OBJECT-LEVEL Gaussian random-walk noise
+    # --------------------------------------------------
+    # One drift vector per timestep (rigid-body consistent)
+    eps = torch.randn(T, 1, 3) * noise_scale
+    noise = torch.cumsum(eps, dim=0)
+
+    noisy_positions = clean_positions + noise  # broadcast over nodes
+
+    # --------------------------------------------------
+    # Build features using NOISY positions
+    # --------------------------------------------------
     node_features = []
     edge_features = []
 
     for t in range(h, T):
 
-        # -------- Node features --------
+        # ---- Node features ----
         v_fd = []
-
         for k in range(h):
-            v = (all_positions[t-k] - all_positions[t-k-1])
+            v = noisy_positions[t - k] - noisy_positions[t - k - 1]
             v_fd.append(v)
 
         v_fd = torch.cat(v_fd, dim=1)  # (N, 3h)
 
-        # boundary distance
-        dist = Wall.get_distance_to_point(all_positions[t].numpy())
+        # Boundary distance (computed from noisy positions)
+        dist = Wall.get_distance_to_point(
+            noisy_positions[t].numpy()
+        )
         dist = torch.tensor(dist, dtype=torch.float32).unsqueeze(1)
         dist = torch.clamp(dist, 0.0, 0.5)
 
-        node_feat = torch.cat([v_fd, dist], dim=1)  # (N, 3h+1)
+        node_feat = torch.cat([v_fd, dist], dim=1)
         node_features.append(node_feat)
 
-        # -------- Edge features --------
-        pos_t = all_positions[t]
-        d = pos_t[sender] - pos_t[receiver]        # (E,3)
+        # ---- Edge features ----
+        pos_t = noisy_positions[t]
+        d = pos_t[sender] - pos_t[receiver]
         d_norm = torch.norm(d, dim=1, keepdim=True)
 
         edge_feat = torch.cat([d, d_norm, dU, dU_norm], dim=1)
         edge_features.append(edge_feat)
 
-    node_features = torch.stack(node_features)   # (T-h, N, 3h+1)
-    edge_features = torch.stack(edge_features)   # (T-h, E, 8)
+    node_features = torch.stack(node_features)     # (T-h, N, 3h+1)
+    edge_features = torch.stack(edge_features)     # (T-h, E, 8)
 
-    return node_features, edge_features, edge_index, all_positions[h:]
+    return (
+        node_features,
+        edge_features,
+        edge_index,
+        clean_positions[h:],   # for clean targets
+        noisy_positions[h:],   # for noisy inputs
+    )

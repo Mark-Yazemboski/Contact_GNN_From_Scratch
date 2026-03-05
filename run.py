@@ -23,25 +23,26 @@ message_passing_layers = 3
 
 
 #Trains the GNN model
-train_gnn.train_gnn(
-    Floor, 
-    num_trajectories_train=Num_train_trajectories, 
-    num_trajectories_test=Num_test_trajectories,
-    save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
-    save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
-    save_model_path="models/gns_model.pt", 
-    rebuild_datasets=True,
-    epochs=400, 
-    batch_size=64, 
-    lr=1e-4,
-    nodes_per_edge=nodes_per_edge,
-    message_passing_layers=message_passing_layers,
-)
+# train_gnn.train_gnn(
+#     Floor, 
+#     num_trajectories_train=Num_train_trajectories, 
+#     num_trajectories_test=Num_test_trajectories,
+#     save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
+#     save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
+#     save_model_path="models/gns_model.pt", 
+#     rebuild_datasets=True,
+#     epochs=200,
+#     batch_size=64, 
+#     lr=1e-4,
+#     nodes_per_edge=nodes_per_edge,
+#     message_passing_layers=message_passing_layers,
+#     augment_data=True
+# )
 
 
 
 # Get dims from one test trajectory
-node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_features(Floor, throw_number=0)
+node_feat, edge_feat, edge_index, true_positions, noisy_positions = generate_node_states.get_gns_features(Floor, throw_number=0)
 node_dim = node_feat.shape[2]
 edge_dim = edge_feat.shape[2]
 
@@ -51,10 +52,11 @@ model.load_state_dict(torch.load("models/gns_model.pt", map_location=device))
 model.to(device)
 model.eval()
 
-# Load accel normalization stats
-norm_stats = torch.load("models/gns_model_accel_minmax.pt", map_location=device)
-accel_min = norm_stats["acc_min"]
-accel_max = norm_stats["acc_max"]
+# Load accel normalization stats (disabled for now)
+# norm_stats = torch.load("models/gns_model_accel_minmax.pt", map_location=device)
+# accel_min = norm_stats["acc_min"]
+# accel_max = norm_stats["acc_max"]
+
 
 
 #Runs a rollout on a test trajectory
@@ -85,8 +87,6 @@ pred_positions, true_positions = display_results.rollout_trajectory_feedback_sha
     throw_number=0,
     nodes_per_edge=nodes_per_edge,
     rest_positions=nodes_body,
-    accel_min=accel_min,
-    accel_max=accel_max
 )  
 
 #Animates the results
