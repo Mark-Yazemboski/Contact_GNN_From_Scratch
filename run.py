@@ -34,7 +34,7 @@ if Train:
         save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
         save_model_path="models/gns_model.pt", 
         rebuild_datasets=True,
-        epochs=100, 
+        epochs=400, 
         batch_size=64, 
         lr=1e-4,
         nodes_per_edge=nodes_per_edge,
@@ -85,14 +85,15 @@ display_results.display_meshed_cube(nodes_body)
 pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
     model,
     Floor,
-    throw_number=568,
+    throw_number=1,
     nodes_per_edge=nodes_per_edge,
     rest_positions=nodes_body,
     accel_std=accel_std,
     accel_mean=accel_mean,
-    shape_alpha=1.0
+    do_shape_match=True,
+    shape_alpha= 1.0
     
 )  
 
 #Animates the results
-display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/pen_and_Vel_loss_func_rollout.gif")
+display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/Big_Test.gif")

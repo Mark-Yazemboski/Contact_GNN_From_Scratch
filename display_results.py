@@ -70,6 +70,7 @@ def rollout_trajectory_feedback_shape_match(
     rest_positions=None,
     accel_std=None,
     accel_mean=None,
+    do_shape_match=True,
     shape_alpha=1.0
 ):
     """
@@ -131,7 +132,10 @@ def rollout_trajectory_feedback_shape_match(
             a_t = a_t * accel_std + accel_mean
 
         x_next = a_t + 2.0 * x_t - x_tm1
-        x_next = shape_match(x_next, rest_positions, alpha=shape_alpha)
+
+        if do_shape_match:  
+            print("Applying shape matching...")
+            x_next = shape_match(x_next, rest_positions, alpha=shape_alpha)
 
         pred_positions.append(x_next)
 

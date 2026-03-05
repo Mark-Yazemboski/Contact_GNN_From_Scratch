@@ -182,6 +182,62 @@ def build_dataset(Wall, traj_range,
 
     return dataset
 
+def random_z_rotation():
+    theta = torch.rand(1) * 2 * torch.pi
+    c = torch.cos(theta)
+    s = torch.sin(theta)
+
+    R = torch.tensor([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ]).squeeze()
+
+    return R
+
+def rotate_batch(batch):
+    device = batch.x.device
+    R = random_z_rotation().to(device)
+
+    # ---- Rotate node features ----
+    # x contains [v_t, v_tm1, dist]
+    # So rotate only first 6 dims (2 velocity vectors)
+
+    node_dim = batch.x.shape[1]
+    if node_dim >= 6:
+        v = batch.x[:, :6]  # first two 3D vectors
+        dist = batch.x[:, 6:]
+
+        v = v.view(-1, 2, 3)
+        v = torch.matmul(v, R.T)
+        v = v.view(-1, 6)
+
+        batch.x = torch.cat([v, dist], dim=1)
+
+    # ---- Rotate edge features ----
+    # edge_attr = [d, d_norm, dU, dU_norm]
+
+    edge_dim = batch.edge_attr.shape[1]
+
+    if edge_dim >= 8:
+        d = batch.edge_attr[:, 0:3]
+        d_norm = batch.edge_attr[:, 3:4]
+        dU = batch.edge_attr[:, 4:7]
+        dU_norm = batch.edge_attr[:, 7:8]
+
+        d = d @ R.T
+        dU = dU @ R.T
+
+        batch.edge_attr = torch.cat(
+            [d, d_norm, dU, dU_norm],
+            dim=1
+        )
+
+    # ---- Rotate acceleration target ----
+    batch.y = batch.y @ R.T
+
+    return batch
+
 
 #This function trains the GNS model
 def train_gnn(Wall,
@@ -259,11 +315,10 @@ def train_gnn(Wall,
 
         #Iterates through batches of data
         for batch in loader:
-
+            batch = batch.to(device)
+            batch = rotate_batch(batch)
             
 
-            #Moves batch to the appropriate device
-            batch = batch.to(device)
 
             #Zeroes the gradients
             optimizer.zero_grad()
