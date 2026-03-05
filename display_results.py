@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import animation
 import torch_geometric
-from generate_node_states import get_gns_features, BLOCK_HALF_WIDTH
+from generate_node_states import get_gns_features, BLOCK_HALF_WIDTH, knn_adjacency
 from train_gnn import GNSModel  # import your model class
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,7 +65,7 @@ def rollout_trajectory_feedback_shape_match(
     model,
     Wall,
     throw_number,
-    nodes_per_edge=5,
+    nodes_per_edge=2,
     h=2,
     rest_positions=None,
     accel_std=None,
@@ -245,14 +245,47 @@ def animate_cube(pred_positions, true_positions=None, interval=50, save_path=Non
     plt.show()
 
 
-def display_meshed_cube(points):
+def display_meshed_cube(points, edge_index=None, nearest_neighbors=4):
+    """
+    Display mesh points and edges.
+
+    points: (N, 3) torch.Tensor or np.ndarray
+    edge_index: optional (2, E) connectivity. If None, KNN edges are built.
+    nearest_neighbors: used only when edge_index is None.
+    """
+    if torch.is_tensor(points):
+        points_np = points.detach().cpu().numpy()
+    else:
+        points_np = points
+
+    if edge_index is None:
+        edge_index = knn_adjacency(points_np, k=nearest_neighbors)
+    elif torch.is_tensor(edge_index):
+        edge_index = edge_index.detach().cpu().numpy()
+
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='r')
+
+    ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], c='r')
+
+    # Draw directed edges in edge_index.
+    for i in range(edge_index.shape[1]):
+        src = int(edge_index[0, i])
+        dst = int(edge_index[1, i])
+
+        ax.plot(
+            [points_np[src, 0], points_np[dst, 0]],
+            [points_np[src, 1], points_np[dst, 1]],
+            [points_np[src, 2], points_np[dst, 2]],
+            c='k',
+            alpha=0.35,
+            linewidth=1.0
+        )
+
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
-    ax.set_title('Meshed Cube Surface Points')
+    ax.set_title('Meshed Cube Surface Points + Edges')
     plt.show()
 
 def _match_feature_dim(feat, target_dim):
@@ -314,3 +347,193 @@ def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall
         e_attr = (e_attr - e_mean) / e_std
 
     return x_node, e_attr
+
+
+def animate_rotated_with_velocities_and_edges(
+    Wall,
+    throw_number,
+    nodes_per_edge=2,
+    h=2,
+    interval=50,
+    save_path=None
+):
+    """
+        Debug animation that mirrors train-time augmentation:
+            - rotate node velocity vectors like train_gnn.rotate_batch
+            - rotate edge features [d, d_norm, dU, dU_norm] like train_gnn.rotate_batch
+            - draw edges from edge_feat displacement d (not from node-node geometry)
+    """
+
+    node_feat, edge_feat, edge_index, positions = get_gns_features(
+        Wall,
+        throw_number,
+        nodes_per_edge=nodes_per_edge,
+        h=h
+    )
+
+    positions = positions.cpu()
+    edge_index = edge_index.cpu()
+    node_feat = node_feat.cpu()
+    edge_feat = edge_feat.cpu()
+
+    # ---- Velocities from node features ----
+    # train_gnn.rotate_batch rotates only first 6 dims (two 3D vectors)
+    if node_feat.shape[-1] >= 6:
+        velocities = node_feat[:, :, 0:6].reshape(
+            node_feat.shape[0],
+            node_feat.shape[1],
+            2,
+            3
+        ).sum(dim=2)
+    else:
+        velocities = torch.zeros_like(positions)
+
+    # ---- Rotation ----
+    theta = torch.rand(1) * 2 * torch.pi
+    c = torch.cos(theta)
+    s = torch.sin(theta)
+
+    R = torch.tensor([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ]).squeeze()
+
+    pos_rot = positions @ R.T
+    vel_rot = velocities @ R.T
+
+    # ---- Rotate edge features exactly like train_gnn.rotate_batch ----
+    # edge_feat = [d, d_norm, dU, dU_norm]
+    if edge_feat.shape[-1] >= 8:
+        d = edge_feat[:, :, 0:3]
+        d_norm = edge_feat[:, :, 3:4]
+        d_u = edge_feat[:, :, 4:7]
+        d_u_norm = edge_feat[:, :, 7:8]
+
+        d_rot = d @ R.T
+        d_u_rot = d_u @ R.T
+
+        edge_feat_rot = torch.cat([d_rot, d_norm, d_u_rot, d_u_norm], dim=-1)
+    else:
+        edge_feat_rot = edge_feat
+
+    # Edge vectors used for drawing (must come from edge_feat, not node positions)
+    edge_d = edge_feat[:, :, 0:3] if edge_feat.shape[-1] >= 3 else None
+    edge_d_rot = edge_feat_rot[:, :, 0:3] if edge_feat_rot.shape[-1] >= 3 else None
+
+    # Convert to numpy
+    positions = positions.numpy()
+    pos_rot = pos_rot.numpy()
+    velocities = velocities.numpy()
+    vel_rot = vel_rot.numpy()
+    edge_d = edge_d.numpy() if edge_d is not None else None
+    edge_d_rot = edge_d_rot.numpy() if edge_d_rot is not None else None
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Set limits
+    all_pos = torch.cat([torch.tensor(positions),
+                         torch.tensor(pos_rot)], dim=0)
+
+    ax.set_xlim(all_pos[:, :, 0].min(), all_pos[:, :, 0].max())
+    ax.set_ylim(all_pos[:, :, 1].min(), all_pos[:, :, 1].max())
+    ax.set_zlim(all_pos[:, :, 2].min(), all_pos[:, :, 2].max())
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+
+    ax.set_title("Blue = Original | Red = Rotated")
+
+    def update(frame):
+        ax.cla()  # 🔥 Proper 3D clear
+
+        # Re-set limits after clearing
+        ax.set_xlim(all_pos[:, :, 0].min(), all_pos[:, :, 0].max())
+        ax.set_ylim(all_pos[:, :, 1].min(), all_pos[:, :, 1].max())
+        ax.set_zlim(all_pos[:, :, 2].min(), all_pos[:, :, 2].max())
+
+        # Plot nodes
+        ax.scatter(
+            positions[frame, :, 0],
+            positions[frame, :, 1],
+            positions[frame, :, 2],
+            c='b'
+        )
+
+        ax.scatter(
+            pos_rot[frame, :, 0],
+            pos_rot[frame, :, 1],
+            pos_rot[frame, :, 2],
+            c='r'
+        )
+
+        # Plot edges from edge_feat displacement d using sender anchor.
+        # For each edge: d = x_sender - x_receiver, so receiver = sender - d.
+        if edge_d is not None and edge_d_rot is not None:
+            for i in range(edge_index.shape[1]):
+                src = int(edge_index[0, i])
+
+                src_pos = positions[frame, src]
+                dst_from_feat = src_pos - edge_d[frame, i]
+
+                src_pos_rot = pos_rot[frame, src]
+                dst_from_feat_rot = src_pos_rot - edge_d_rot[frame, i]
+
+                ax.plot(
+                    [src_pos[0], dst_from_feat[0]],
+                    [src_pos[1], dst_from_feat[1]],
+                    [src_pos[2], dst_from_feat[2]],
+                    c='b',
+                    alpha=0.3
+                )
+
+                ax.plot(
+                    [src_pos_rot[0], dst_from_feat_rot[0]],
+                    [src_pos_rot[1], dst_from_feat_rot[1]],
+                    [src_pos_rot[2], dst_from_feat_rot[2]],
+                    c='r',
+                    alpha=0.3
+                )
+
+        # Velocity vectors
+        ax.quiver(
+            positions[frame, :, 0],
+            positions[frame, :, 1],
+            positions[frame, :, 2],
+            velocities[frame, :, 0],
+            velocities[frame, :, 1],
+            velocities[frame, :, 2],
+            color='b',
+            length=0.05,
+            normalize=True
+        )
+
+        ax.quiver(
+            pos_rot[frame, :, 0],
+            pos_rot[frame, :, 1],
+            pos_rot[frame, :, 2],
+            vel_rot[frame, :, 0],
+            vel_rot[frame, :, 1],
+            vel_rot[frame, :, 2],
+            color='r',
+            length=0.05,
+            normalize=True
+        )
+
+    ani = animation.FuncAnimation(
+        fig,
+        update,
+        frames=positions.shape[0],
+        interval=interval,
+        blit=False
+    )
+
+    ax.set_aspect('equal')
+    if save_path is not None:
+        print(f"Saving animation to {save_path}...")
+        ani.save(save_path, writer='pillow', fps=1000 // interval)
+        print("Saved successfully.")
+    
+    plt.show()

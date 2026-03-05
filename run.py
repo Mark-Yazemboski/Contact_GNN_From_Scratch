@@ -21,6 +21,9 @@ Num_test_trajectories = Num_total_trajectories - Num_train_trajectories
 nodes_per_edge = 2
 message_passing_layers = 3
 
+show_meshed_cube = False
+show_augmentation = False
+show_rollout = True
 
 Train = False
 
@@ -44,7 +47,11 @@ if Train:
 
 
 # Get dims from one test trajectory
-node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_features(Floor, throw_number=0)
+node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_features(
+    Floor,
+    throw_number=0,
+    nodes_per_edge=nodes_per_edge
+)
 node_dim = node_feat.shape[2]
 edge_dim = edge_feat.shape[2]
 
@@ -64,44 +71,42 @@ accel_std = norm_stats["acc_std"]
 accel_mean = norm_stats["acc_mean"]
 
 
-#Runs a rollout on a test trajectory
-nodes_body = torch.tensor(
+
+
+if show_meshed_cube:
+    nodes_body = torch.tensor(
         generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
         dtype=torch.float32
     )
-
-display_results.display_meshed_cube(nodes_body)
-
+    display_results.display_meshed_cube(nodes_body, edge_index=edge_index)
 
 
+if show_augmentation:
+    display_results.animate_rotated_with_velocities_and_edges(
+        Floor,
+        throw_number=0,
+        save_path="Gifs/Showing_Rotated_Cube.gif",
+        nodes_per_edge=nodes_per_edge,
+    )
 
 
-# pred_positions, true_positions = display_results.rollout_trajectory(
-#     model,
-#     Floor,
-#     throw_number=0,
-#     nodes_per_edge=nodes_per_edge,
-#     rest_positions=nodes_body,
-#     accel_min=accel_min,
-#     accel_max=accel_max
-# )  
+if show_rollout:
+    pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
+        model,
+        Floor,
+        throw_number=568,
+        nodes_per_edge=nodes_per_edge,
+        rest_positions=nodes_body,
+        accel_std=accel_std,
+        accel_mean=accel_mean,
+        x_mean=x_mean,
+        x_std=x_std,
+        e_mean=e_mean,
+        e_std=e_std,
+        do_shape_match=True,
+        shape_alpha= 1.0
+        
+    )  
+    display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/Big_Test.gif")
 
-pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
-    model,
-    Floor,
-    throw_number=568,
-    nodes_per_edge=nodes_per_edge,
-    rest_positions=nodes_body,
-    accel_std=accel_std,
-    accel_mean=accel_mean,
-    x_mean=x_mean,
-    x_std=x_std,
-    e_mean=e_mean,
-    e_std=e_std,
-    do_shape_match=True,
-    shape_alpha= 1.0
-    
-)  
 
-#Animates the results
-display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/Big_Test.gif")
