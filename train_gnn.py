@@ -281,16 +281,21 @@ def train_gnn(Wall,
         print(f"Test dataset loaded from {save_test_dataset_path}")
 
 
+    x_mean, x_std = _compute_node_stats(dataset_train)
+    e_mean, e_std = _compute_edge_stats(dataset_train)
     acc_mean, acc_std = _compute_accel_stats(dataset_train)
+
+    _apply_input_normalization(dataset_train, x_mean, x_std, e_mean, e_std)
+    _apply_input_normalization(dataset_test, x_mean, x_std, e_mean, e_std)
 
     _apply_accel_normalization(dataset_train, acc_mean, acc_std)
     _apply_accel_normalization(dataset_test, acc_mean, acc_std)
 
     # Save stats
-    norm_stats_path = os.path.splitext(save_model_path)[0] + "_accel_norm.pt"
-    torch.save({"acc_mean": acc_mean, "acc_std": acc_std}, norm_stats_path)
+    norm_stats_path = os.path.splitext(save_model_path)[0] + "_norms.pt"
+    torch.save({"x_mean": x_mean, "x_std": x_std, "e_mean": e_mean, "e_std": e_std, "acc_mean": acc_mean, "acc_std": acc_std}, norm_stats_path)
 
-    print(f"Saved accel normalization stats to {norm_stats_path}")
+    print(f"Saved normalization stats to {norm_stats_path}")
 
 
     loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
@@ -354,6 +359,28 @@ def _compute_accel_stats(dataset):
     acc_std = y_all.std(dim=0).clamp_min(1e-8)
 
     return acc_mean, acc_std
+
+def _compute_node_stats(dataset):
+    x_all = torch.cat([d.x for d in dataset], dim=0)
+
+    mean = x_all.mean(dim=0)
+    std = x_all.std(dim=0).clamp_min(1e-8)
+
+    return mean, std
+
+def _compute_edge_stats(dataset):
+    e_all = torch.cat([d.edge_attr for d in dataset], dim=0)
+
+    mean = e_all.mean(dim=0)
+    std = e_all.std(dim=0).clamp_min(1e-8)
+
+    return mean, std
+
+def _apply_input_normalization(dataset, x_mean, x_std, e_mean, e_std):
+
+    for d in dataset:
+        d.x = (d.x - x_mean) / x_std
+        d.edge_attr = (d.edge_attr - e_mean) / e_std
 
 
 def _apply_accel_normalization(dataset, acc_mean, acc_std):

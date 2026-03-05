@@ -33,7 +33,7 @@ if Train:
         save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
         save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
         save_model_path="models/gns_model.pt", 
-        rebuild_datasets=True,
+        rebuild_datasets=False,
         epochs=400, 
         batch_size=64, 
         lr=1e-4,
@@ -54,8 +54,12 @@ model.load_state_dict(torch.load("models/gns_model.pt", map_location=device))
 model.to(device)
 model.eval()
 
-# Load accel normalization stats
-norm_stats = torch.load("models/gns_model_accel_norm.pt", map_location=device)
+# Load normalization stats
+norm_stats = torch.load("models/gns_model_norms.pt", map_location=device)
+x_mean = norm_stats["x_mean"]
+x_std = norm_stats["x_std"]
+e_mean = norm_stats["e_mean"]
+e_std = norm_stats["e_std"]
 accel_std = norm_stats["acc_std"]
 accel_mean = norm_stats["acc_mean"]
 
@@ -85,11 +89,15 @@ display_results.display_meshed_cube(nodes_body)
 pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
     model,
     Floor,
-    throw_number=1,
+    throw_number=568,
     nodes_per_edge=nodes_per_edge,
     rest_positions=nodes_body,
     accel_std=accel_std,
     accel_mean=accel_mean,
+    x_mean=x_mean,
+    x_std=x_std,
+    e_mean=e_mean,
+    e_std=e_std,
     do_shape_match=True,
     shape_alpha= 1.0
     

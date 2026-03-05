@@ -70,6 +70,10 @@ def rollout_trajectory_feedback_shape_match(
     rest_positions=None,
     accel_std=None,
     accel_mean=None,
+    x_mean=None,
+    x_std=None,
+    e_mean=None,
+    e_std=None,
     do_shape_match=True,
     shape_alpha=1.0
 ):
@@ -96,6 +100,12 @@ def rollout_trajectory_feedback_shape_match(
     if accel_std is not None and accel_mean is not None:
         accel_std = accel_std.to(device)
         accel_mean = accel_mean.to(device)
+    if x_mean is not None and x_std is not None:
+        x_mean = x_mean.to(device)
+        x_std = x_std.to(device)
+    if e_mean is not None and e_std is not None:
+        e_mean = e_mean.to(device)
+        e_std = e_std.to(device)
 
     # Need 3 frames for h=2 finite-difference velocity history
     if true_positions.shape[0] < 3:
@@ -116,7 +126,11 @@ def rollout_trajectory_feedback_shape_match(
         x_node, e_attr = _build_feedback_features(
             x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
             node_dim_target=node_dim_target,
-            edge_dim_target=edge_dim_target
+            edge_dim_target=edge_dim_target,
+            x_mean=x_mean,
+            x_std=x_std,
+            e_mean=e_mean,
+            e_std=e_std
         )
 
         data = torch_geometric.data.Data(
@@ -134,7 +148,6 @@ def rollout_trajectory_feedback_shape_match(
         x_next = a_t + 2.0 * x_t - x_tm1
 
         if do_shape_match:  
-            print("Applying shape matching...")
             x_next = shape_match(x_next, rest_positions, alpha=shape_alpha)
 
         pred_positions.append(x_next)
@@ -254,7 +267,8 @@ def _match_feature_dim(feat, target_dim):
 
 
 def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
-                             node_dim_target, edge_dim_target):
+                             node_dim_target, edge_dim_target,
+                             x_mean=None, x_std=None, e_mean=None, e_std=None):
     """
     Build node/edge features from predicted positions for closed-loop rollout.
     Node base: [v_t, v_{t-1}, boundary_dist]
@@ -289,5 +303,14 @@ def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall
 
     e_attr = torch.cat([d, d_norm, d_u, d_u_norm], dim=-1)
     e_attr = _match_feature_dim(e_attr, edge_dim_target)
+
+    # -------------------------
+    # Apply normalization
+    # -------------------------
+    if x_mean is not None and x_std is not None:
+        x_node = (x_node - x_mean) / x_std
+
+    if e_mean is not None and e_std is not None:
+        e_attr = (e_attr - e_mean) / e_std
 
     return x_node, e_attr
