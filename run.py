@@ -70,14 +70,14 @@ e_std = norm_stats["e_std"]
 accel_std = norm_stats["acc_std"]
 accel_mean = norm_stats["acc_mean"]
 
-
-
-
-if show_meshed_cube:
-    nodes_body = torch.tensor(
+nodes_body = torch.tensor(
         generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
         dtype=torch.float32
     )
+
+
+if show_meshed_cube:
+    
     display_results.display_meshed_cube(nodes_body, edge_index=edge_index)
 
 
@@ -91,7 +91,7 @@ if show_augmentation:
 
 
 if show_rollout:
-    pred_positions, true_positions = display_results.rollout_trajectory_feedback_shape_match(
+    pred_positions, true_positions, edge_info = display_results.rollout_trajectory_feedback_shape_match(
         model,
         Floor,
         throw_number=568,
@@ -104,9 +104,15 @@ if show_rollout:
         e_mean=e_mean,
         e_std=e_std,
         do_shape_match=True,
-        shape_alpha= 1.0
+        shape_alpha= 1.0,
+        return_edge_info=True
         
     )  
-    display_results.animate_cube(pred_positions, true_positions, save_path="Gifs/Big_Test.gif")
+    display_results.animate_cube(
+        pred_positions,
+        true_positions,
+        edge_info=edge_info,
+        save_path="Gifs/Big_Test.gif"
+    )
 
 

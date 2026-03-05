@@ -75,7 +75,8 @@ def rollout_trajectory_feedback_shape_match(
     e_mean=None,
     e_std=None,
     do_shape_match=True,
-    shape_alpha=1.0
+    shape_alpha=1.0,
+    return_edge_info=False
 ):
     """
     Closed-loop rollout:
@@ -83,6 +84,10 @@ def rollout_trajectory_feedback_shape_match(
       2) integrate x_{t+1} = a_t + 2 x_t - x_{t-1}
       3) shape-match x_{t+1}
       4) feed updated positions into next step feature construction
+
+        If return_edge_info=True, also returns a dict with:
+            - edge_index: (2, E)
+            - edge_feat:  (T-h, E, F)
     """
     node_feat, edge_feat, edge_index, true_positions = get_gns_features(
         Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h
@@ -153,7 +158,16 @@ def rollout_trajectory_feedback_shape_match(
         pred_positions.append(x_next)
 
     pred_positions = torch.stack(pred_positions, dim=0).cpu()
-    return pred_positions, true_positions.cpu()
+    true_positions_cpu = true_positions.cpu()
+
+    if return_edge_info:
+        edge_info = {
+            "edge_index": edge_index.cpu(),
+            "edge_feat": edge_feat.cpu(),
+        }
+        return pred_positions, true_positions_cpu, edge_info
+
+    return pred_positions, true_positions_cpu
 
 # -----------------------------
 # Plot RMSE
@@ -170,12 +184,19 @@ def plot_rmse(pred_acc, true_acc):
 # -----------------------------
 # Animation function
 # -----------------------------
-def animate_cube(pred_positions, true_positions=None, interval=50, save_path=None):
+def animate_cube(
+    pred_positions,
+    true_positions=None,
+    edge_info=None,
+    interval=50,
+    save_path=None
+):
     """
-    Animate predicted node positions and optionally ground truth using scatter points.
+    Animate predicted node positions and optionally ground truth with edges.
     
     pred_positions: Tensor (T, N, 3)
     true_positions: Tensor (T, N, 3) (optional)
+    edge_info: dict with key "edge_index" from rollout_trajectory_feedback_shape_match
     interval: ms between frames
     save_path: string path to save GIF (optional)
     """
@@ -187,10 +208,19 @@ def animate_cube(pred_positions, true_positions=None, interval=50, save_path=Non
     if true_positions is not None:
         true_positions = true_positions.cpu()
 
-    # Axis limits
-    x_min, x_max = pred_positions[:, :, 0].min(), pred_positions[:, :, 0].max()
-    y_min, y_max = pred_positions[:, :, 1].min(), pred_positions[:, :, 1].max()
-    z_min, z_max = pred_positions[:, :, 2].min(), pred_positions[:, :, 2].max()
+    # Intentionally require precomputed edge info from rollout.
+    edge_index = edge_info["edge_index"]
+    if torch.is_tensor(edge_index):
+        edge_index = edge_index.detach().cpu().numpy()
+
+    # Axis limits (include GT if available)
+    all_pos = pred_positions
+    if true_positions is not None:
+        all_pos = torch.cat([pred_positions, true_positions], dim=0)
+
+    x_min, x_max = all_pos[:, :, 0].min(), all_pos[:, :, 0].max()
+    y_min, y_max = all_pos[:, :, 1].min(), all_pos[:, :, 1].max()
+    z_min, z_max = all_pos[:, :, 2].min(), all_pos[:, :, 2].max()
     
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
@@ -209,12 +239,37 @@ def animate_cube(pred_positions, true_positions=None, interval=50, save_path=Non
     else:
         gt_scatter = None
 
+    pred_edge_lines = [
+        ax.plot([], [], [], c='r', alpha=0.25, linewidth=1.0)[0]
+        for _ in range(edge_index.shape[1])
+    ]
+
+    if true_positions is not None:
+        gt_edge_lines = [
+            ax.plot([], [], [], c='b', alpha=0.2, linewidth=1.0)[0]
+            for _ in range(edge_index.shape[1])
+        ]
+    else:
+        gt_edge_lines = []
+
     def update(frame):
         pred_scatter._offsets3d = (
             pred_positions[frame, :, 0].numpy(),
             pred_positions[frame, :, 1].numpy(),
             pred_positions[frame, :, 2].numpy()
         )
+
+        for i in range(edge_index.shape[1]):
+            src = int(edge_index[0, i])
+            dst = int(edge_index[1, i])
+
+            pred_edge_lines[i].set_data(
+                [pred_positions[frame, src, 0].item(), pred_positions[frame, dst, 0].item()],
+                [pred_positions[frame, src, 1].item(), pred_positions[frame, dst, 1].item()]
+            )
+            pred_edge_lines[i].set_3d_properties(
+                [pred_positions[frame, src, 2].item(), pred_positions[frame, dst, 2].item()]
+            )
 
         if true_positions is not None:
             gt_scatter._offsets3d = (
@@ -223,7 +278,22 @@ def animate_cube(pred_positions, true_positions=None, interval=50, save_path=Non
                 true_positions[frame, :, 2].numpy()
             )
 
-        return (pred_scatter,) if gt_scatter is None else (pred_scatter, gt_scatter)
+            for i in range(edge_index.shape[1]):
+                src = int(edge_index[0, i])
+                dst = int(edge_index[1, i])
+
+                gt_edge_lines[i].set_data(
+                    [true_positions[frame, src, 0].item(), true_positions[frame, dst, 0].item()],
+                    [true_positions[frame, src, 1].item(), true_positions[frame, dst, 1].item()]
+                )
+                gt_edge_lines[i].set_3d_properties(
+                    [true_positions[frame, src, 2].item(), true_positions[frame, dst, 2].item()]
+                )
+
+        artists = [pred_scatter] + pred_edge_lines
+        if gt_scatter is not None:
+            artists = artists + [gt_scatter] + gt_edge_lines
+        return tuple(artists)
 
     ani = animation.FuncAnimation(
         fig,
