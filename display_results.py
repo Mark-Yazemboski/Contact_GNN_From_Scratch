@@ -1,66 +1,67 @@
-# display_results.py
-
 import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import animation
 import torch_geometric
-from generate_node_states import get_gns_features, BLOCK_HALF_WIDTH, knn_adjacency
-from train_gnn import GNSModel  # import your model class
+from generate_node_states import get_gns_features, knn_adjacency
+from train_gnn import GNSModel 
 
+#Set device for PyTorch (GPU if available, otherwise CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-HZ = 144
-DT = 1.0 / HZ
 
-# -----------------------------
-# Load trained model
-# -----------------------------
-def load_model(model_path, node_dim, edge_dim, device=device):
-    model = GNSModel(node_dim, edge_dim)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-    return model
 
+
+#This function performs shape matching to align the predicted positions with the rest positions,
+#which helps to correct for drift in the predictions over time.
 def shape_match(pred_positions, rest_positions, masses=None, alpha=1.0):
-    """
-    pred_positions: (N,3) predicted positions at current timestep
-    rest_positions: (N,3) undeformed rest shape
-    masses: optional (N,) tensor
-    alpha: stiffness [0..1]
-    """
+
+    # pred_positions: (N, 3) tensor of current predicted positions
+    # rest_positions: (N, 3) tensor of rest positions (e.g. initial configuration)
+    # masses: optional (N,) tensor of node masses for weighted shape matching
+    # alpha: blending factor [0,1] for how much to move toward shape-matched positions
+
+    #gets the number of nodes from the predicted positions tensor, which is needed for the shape matching calculations.
     N = pred_positions.shape[0]
 
+    #If masses are not provided, it defaults to uniform masses for all nodes. 
+    #This is used in the shape matching calculations to compute the centers of mass and the Apq matrix.
     if masses is None:
         masses = torch.ones(N, device=pred_positions.device)
 
-    # compute centers of mass
+    #Compute centers of mass for the rest positions and the predicted positions. 
+    #This is done by taking a weighted average of the positions using the masses, 
+    #which gives the center of mass for each configuration.
     x0_cm = (rest_positions * masses[:, None]).sum(0) / masses.sum()
     x_cm = (pred_positions * masses[:, None]).sum(0) / masses.sum()
 
-    # relative positions
-    q = rest_positions - x0_cm   # (N,3)
-    p = pred_positions - x_cm    # (N,3)
+    #Finds the relative positions of the nodes to the center of mass for both the rest positions and the predicted positions.
+    q = rest_positions - x0_cm   
+    p = pred_positions - x_cm  
 
-    # compute Apq
-    # sum_i m_i * p_i * q_i^T
+    #Computes the Apq matrix, which is a weighted covariance matrix between the rest positions relative to their
+    #center of mass and the predicted positions relative to their center of mass.
     Apq = (masses[:, None, None] * p[:, :, None] @ q[:, None, :]).sum(0)  # (3,3)
 
-    # polar decomposition to get rotation
+    #Performs Singular Value Decomposition (SVD) on the Apq matrix to find the optimal rotation
+    #that aligns the predicted positions with the rest positions.
     U, S, Vh = torch.linalg.svd(Apq)
     R = U @ Vh
 
-    # goal positions
+    #Applies the rotation to the predicted positions and translates them 
+    #to align with the center of mass of the predicted positions.
     g = (R @ q.T).T + x_cm  # (N,3)
 
-    # move toward goal
+    #Blends the original predicted positions with the shape-matched positions using the alpha parameter,
+    #which controls the influence of the shape matching on the final positions.
+    #If alpha is 1, it fully applies the shape matching correction. If alpha is 0, it leaves the predicted positions unchanged.
     new_positions = pred_positions + alpha * (g - pred_positions)
+
+    #Returns the new positions after applying shape matching.
     return new_positions
 
 
-# -----------------------------
-# Run predictions & rollout with feedback
-# -----------------------------
+#This function performs a closed-loop rollout of the GNN model over a trajectory,
+#Aswell as applies shape matching at each step to correct for drift.
 def rollout_trajectory_feedback_shape_match(
     model,
     Wall,
@@ -89,19 +90,25 @@ def rollout_trajectory_feedback_shape_match(
             - edge_index: (2, E)
             - edge_feat:  (T-h, E, F)
     """
+
+    #First generates the node features, edge features, edge indices, and true positions for the specified trajectory in the dataset.
     node_feat, edge_feat, edge_index, true_positions = get_gns_features(
         Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h
     )
 
+    #Converts the edge indices and true positions to the appropriate device (CPU or GPU) for computation.
     edge_index = edge_index.long().to(device)
     true_positions = true_positions.to(device)
-    node_dim_target = node_feat.shape[-1]
-    edge_dim_target = edge_feat.shape[-1]
 
+
+    #If rest positions are not provided, it defaults to using the first frame of the true positions as the rest configuration
+    #for shape matching. Normally the rest positions would be passed in from the "mesh_cube_surface" function.
     if rest_positions is None:
         rest_positions = true_positions[0].clone()
     rest_positions = rest_positions.to(device)
     
+    #Moves the normalization statistics to the appropriate device if they are provided, which will be used to denormalize
+    #the model's predictions during the rollout.
     if accel_std is not None and accel_mean is not None:
         accel_std = accel_std.to(device)
         accel_mean = accel_mean.to(device)
@@ -112,54 +119,77 @@ def rollout_trajectory_feedback_shape_match(
         e_mean = e_mean.to(device)
         e_std = e_std.to(device)
 
-    # Need 3 frames for h=2 finite-difference velocity history
+    #Checks that there are at least 3 frames in the true positions, which is necessary for
+    #the feedback rollout with a history of h=2.
     if true_positions.shape[0] < 3:
         raise ValueError("Need at least 3 frames for feedback rollout with h=2.")
 
+    #Sets the initial predicted positions to be the same as the true positions for the first three frames,
+    #which are used as the initial conditions for the rollout.
     pred_positions = [
         true_positions[0].clone(),
         true_positions[1].clone(),
         true_positions[2].clone(),
     ]
 
-    # Build/predict from t=2 -> predict x_{3}, then onward
+    #Performs the closed-loop rollout for the remaining frames in the trajectory, starting from frame 3.
     for _ in range(2, true_positions.shape[0] - 1):
+
+        #Unpacks the last three predicted positions, which are used to build the input features
+        #for the GNN model at the current step.
         x_tm2 = pred_positions[-3]
         x_tm1 = pred_positions[-2]
         x_t = pred_positions[-1]
 
+        #This will take in the current predicted positions and the previous two predicted positions,
+        #along with the edge indices, rest positions, and wall information, (Aswell as the normalization statistics if provided) 
+        #and will output the node features and edge features that are used as input to the GNN model
+        #for the current step of the rollout.
         x_node, e_attr = _build_feedback_features(
             x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
-            node_dim_target=node_dim_target,
-            edge_dim_target=edge_dim_target,
             x_mean=x_mean,
             x_std=x_std,
             e_mean=e_mean,
             e_std=e_std
         )
 
+        #Constructs a PyTorch Geometric Data object with the node features, edge indices, and edge features,
+        #and moves it to the appropriate device.
         data = torch_geometric.data.Data(
             x=x_node,
             edge_index=edge_index,
             edge_attr=e_attr
         ).to(device)
 
+        #Runs a forward pass of the GNN model to predict the accelerations (a_t) for the current step, 
+        #using the constructed Data object as input.
         with torch.no_grad():
             a_t = model(data)
 
+        #Denormalizes the predicted accelerations if the normalization statistics are provided,
         if accel_std is not None and accel_mean is not None:
             a_t = a_t * accel_std + accel_mean
 
+        #Integrates the predicted accelerations to get the next predicted positions (x_next) 
+        #using a simple finite difference scheme,
         x_next = a_t + 2.0 * x_t - x_tm1
 
+        #If shape matching is enabled, it applies the shape matching function to the predicted positions to correct for drift,
         if do_shape_match:  
             x_next = shape_match(x_next, rest_positions, alpha=shape_alpha)
 
+        #Appends the new predicted positions to the list of predicted positions for the trajectory.
         pred_positions.append(x_next)
 
+    #After the rollout is complete, it stacks the list of predicted positions into a single tensor
+    #and moves it to the CPU for further processing or visualization.
     pred_positions = torch.stack(pred_positions, dim=0).cpu()
+
+    #Moves the true positions to the CPU as well
     true_positions_cpu = true_positions.cpu()
 
+    #If return_edge_info is True, it constructs a dictionary containing the edge indices 
+    #and edge features (moved to CPU) and returns it along with the predicted positions and true positions.
     if return_edge_info:
         edge_info = {
             "edge_index": edge_index.cpu(),
@@ -169,21 +199,10 @@ def rollout_trajectory_feedback_shape_match(
 
     return pred_positions, true_positions_cpu
 
-# -----------------------------
-# Plot RMSE
-# -----------------------------
-def plot_rmse(pred_acc, true_acc):
-    rmse = torch.sqrt(((pred_acc - true_acc) ** 2).mean(dim=0))  # per node
-    plt.figure(figsize=(8,6))
-    plt.plot(rmse.numpy())
-    plt.title("Per-node RMSE (x,y,z)")
-    plt.xlabel("Node index")
-    plt.ylabel("RMSE")
-    plt.show()
 
-# -----------------------------
-# Animation function
-# -----------------------------
+#This function given the predicted and true positions, will show both of them in an amimated 3D plot 
+#with the edges drawn between the nodes, which is useful for visualizing how well the model's predictions 
+#match the true trajectory over time.
 def animate_cube(
     pred_positions,
     true_positions=None,
@@ -191,29 +210,22 @@ def animate_cube(
     interval=50,
     save_path=None
 ):
-    """
-    Animate predicted node positions and optionally ground truth with edges.
-    
-    pred_positions: Tensor (T, N, 3)
-    true_positions: Tensor (T, N, 3) (optional)
-    edge_info: dict with key "edge_index" from rollout_trajectory_feedback_shape_match
-    interval: ms between frames
-    save_path: string path to save GIF (optional)
-    """
+    #Sets the figure and 3D axis for the animation.
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     
-    # Move tensors to CPU if needed
+    #Moves pred and true positions to CPU if they are not already, which is necessary for plotting with Matplotlib.
     pred_positions = pred_positions.cpu()
     if true_positions is not None:
         true_positions = true_positions.cpu()
 
-    # Intentionally require precomputed edge info from rollout.
+    #Gets the edge indices from the edge_info dictionary if it is provided, and moves it to CPU if it is a tensor.
     edge_index = edge_info["edge_index"]
     if torch.is_tensor(edge_index):
         edge_index = edge_index.detach().cpu().numpy()
 
-    # Axis limits (include GT if available)
+
+    #This block computes the limits for the 3D plot based on the range of the predicted and true positions,
     all_pos = pred_positions
     if true_positions is not None:
         all_pos = torch.cat([pred_positions, true_positions], dim=0)
@@ -226,11 +238,14 @@ def animate_cube(
     ax.set_ylim(y_min, y_max)
     ax.set_zlim(z_min, z_max)
 
+
+
+    #Sets the axis labels and title for the plot, and initializes the scatter plots for the predicted positions (in red)
+    #and true positions (in blue), as well as the line objects for the edges.
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
     ax.set_title('Red = Prediction | Blue = Ground Truth')
-
     pred_scatter = ax.scatter([], [], [], c='r', label='Pred')
 
     if true_positions is not None:
@@ -252,13 +267,18 @@ def animate_cube(
     else:
         gt_edge_lines = []
 
+
+    #This function updates the positions of the predicted and true nodes, as well as the edges, for each frame of the animation.
     def update(frame):
+
+        #Updates the scatter plot for the predicted positions with the new positions for the current frame.
         pred_scatter._offsets3d = (
             pred_positions[frame, :, 0].numpy(),
             pred_positions[frame, :, 1].numpy(),
             pred_positions[frame, :, 2].numpy()
         )
 
+        #Updates the line objects for the edges based on the current predicted positions and the edge indices.
         for i in range(edge_index.shape[1]):
             src = int(edge_index[0, i])
             dst = int(edge_index[1, i])
@@ -271,6 +291,9 @@ def animate_cube(
                 [pred_positions[frame, src, 2].item(), pred_positions[frame, dst, 2].item()]
             )
 
+
+        #If the true positions are provided, it updates the scatter plot for the true positions and the line objects
+        #for the edges based on the true positions as well.
         if true_positions is not None:
             gt_scatter._offsets3d = (
                 true_positions[frame, :, 0].numpy(),
@@ -290,11 +313,17 @@ def animate_cube(
                     [true_positions[frame, src, 2].item(), true_positions[frame, dst, 2].item()]
                 )
 
+        #Returns the artists that were updated for the current frame, which is necessary for Matplotlib's animation 
+        #to know which objects to redraw.
         artists = [pred_scatter] + pred_edge_lines
         if gt_scatter is not None:
             artists = artists + [gt_scatter] + gt_edge_lines
+
+
         return tuple(artists)
 
+    #This creates the animation using Matplotlib's FuncAnimation, which calls the update function for each frame 
+    #of the animation to update the plot with the new positions and edges.
     ani = animation.FuncAnimation(
         fig,
         update,
@@ -303,10 +332,11 @@ def animate_cube(
         blit=False
     )
 
-    # -------------------------
-    # Optional Save
-    # -------------------------
+    #Sets the axis equal so the scales of each axis are the same.
     ax.set_aspect('equal')
+
+    
+    #Saves the animation as a gif
     if save_path is not None:
         print(f"Saving animation to {save_path}...")
         ani.save(save_path, writer='pillow', fps=1000 // interval)
@@ -315,14 +345,67 @@ def animate_cube(
     plt.show()
 
 
-def display_meshed_cube(points, edge_index=None, nearest_neighbors=4):
-    """
-    Display mesh points and edges.
+#This function builds the node features and edge features for a given time step in the rollout, 
+#using the current predicted positions, the previous two predicted positions, the edge indices,
+#rest positions, wall information, and normalization statistics if provided.
+def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
+                             x_mean=None, x_std=None, e_mean=None, e_std=None):
+    
+    #Computes the velocities of the current time step and the previous time step by taking the difference 
+    #between the predicted positions at the current and previous time steps.
+    v_t = x_t - x_tm1
+    v_tm1 = x_tm1 - x_tm2
 
-    points: (N, 3) torch.Tensor or np.ndarray
-    edge_index: optional (2, E) connectivity. If None, KNN edges are built.
-    nearest_neighbors: used only when edge_index is None.
-    """
+    #Computes the distance to the wall if the Wall information is provided, and concatenates it to the node features.
+    #Also clips the distance to the wall to be between 0 and 0.5, which is a reasonable range for the distances in this dataset.
+    if Wall is not None:
+        wall_n = torch.as_tensor(Wall.get_normal(), dtype=x_t.dtype, device=x_t.device)
+        wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
+        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True)
+        b = torch.clamp(b, 0.0, 0.5)
+        x_node = torch.cat([v_t, v_tm1, b], dim=-1)
+    else:
+        x_node = torch.cat([v_t, v_tm1], dim=-1)
+
+
+    #Calculates the edge features based on the current predicted positions and the rest positions, as well as the edge indices.
+    src, dst = edge_index[0], edge_index[1]
+
+    #Distance vector between source and destination nodes for the current predicted positions, as well as its norm.
+    d = x_t[src] - x_t[dst]
+    d_norm = torch.norm(d, dim=-1, keepdim=True)
+
+    #Distance vector between source and destination nodes for the undeformed cube position, as well as its norm.
+    if rest_positions is not None:
+        d_u = rest_positions[src] - rest_positions[dst]
+        d_u_norm = torch.norm(d_u, dim=-1, keepdim=True)
+    else:
+        d_u = torch.zeros_like(d)
+        d_u_norm = torch.zeros_like(d_norm)
+
+    #Combines the edge features into a single tensor, which includes the distance vector and its norm for both the 
+    #current predicted positions and the rest positions.
+    e_attr = torch.cat([d, d_norm, d_u, d_u_norm], dim=-1)
+
+    #If normalization statistics are provided, it normalizes the node features and edge features using the provided
+    #means and standard deviations.
+    if x_mean is not None and x_std is not None:
+        x_node = (x_node - x_mean) / x_std
+
+    if e_mean is not None and e_std is not None:
+        e_attr = (e_attr - e_mean) / e_std
+
+    #Returns the node features and edge features for the current time step, which will be used as input to the GNN model
+    #for prediction.
+    return x_node, e_attr
+
+
+#This function displays the meshed cube with the initial node positions and edges, 
+#which is useful for visualizing how the nodes are arranged on the cube and how the edges connect them.
+def display_meshed_cube(points, edge_index=None, nearest_neighbors=4):
+
+    #Converts the input points and edge indices to numpy arrays if they are PyTorch tensors, 
+    #which is necessary for plotting with Matplotlib.
     if torch.is_tensor(points):
         points_np = points.detach().cpu().numpy()
     else:
@@ -333,12 +416,15 @@ def display_meshed_cube(points, edge_index=None, nearest_neighbors=4):
     elif torch.is_tensor(edge_index):
         edge_index = edge_index.detach().cpu().numpy()
 
+
+    #Sets the figure and 3D axis for the animation.
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
+    #Plots the points of the meshed cube as red dots in the 3D space.
     ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], c='r')
 
-    # Draw directed edges in edge_index.
+    #Draw directed edges in edge_index.
     for i in range(edge_index.shape[1]):
         src = int(edge_index[0, i])
         dst = int(edge_index[1, i])
@@ -352,74 +438,23 @@ def display_meshed_cube(points, edge_index=None, nearest_neighbors=4):
             linewidth=1.0
         )
 
+    #Sets the axis labels and title for the plot
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
     ax.set_title('Meshed Cube Surface Points + Edges')
+
     plt.show()
 
-def _match_feature_dim(feat, target_dim):
-    """Pad/truncate feature dimension to match trained model input size."""
-    d = feat.shape[-1]
-    if d == target_dim:
-        return feat
-    if d < target_dim:
-        pad = torch.zeros(feat.shape[0], target_dim - d, device=feat.device, dtype=feat.dtype)
-        return torch.cat([feat, pad], dim=-1)
-    return feat[:, :target_dim]
 
 
-def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
-                             node_dim_target, edge_dim_target,
-                             x_mean=None, x_std=None, e_mean=None, e_std=None):
-    """
-    Build node/edge features from predicted positions for closed-loop rollout.
-    Node base: [v_t, v_{t-1}, boundary_dist]
-    Edge base: [d_ij, ||d_ij||, dU_ij, ||dU_ij||]
-    """
-    # Node features
-    v_t = x_t - x_tm1
-    v_tm1 = x_tm1 - x_tm2
-
-    if Wall is not None:
-        wall_n = torch.as_tensor(Wall.get_normal(), dtype=x_t.dtype, device=x_t.device)
-        wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
-        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True)
-        b = torch.clamp(b, 0.0, 0.5)
-        x_node = torch.cat([v_t, v_tm1, b], dim=-1)
-    else:
-        x_node = torch.cat([v_t, v_tm1], dim=-1)
-
-    x_node = _match_feature_dim(x_node, node_dim_target)
-
-    # Edge features
-    src, dst = edge_index[0], edge_index[1]
-    d = x_t[src] - x_t[dst]
-    d_norm = torch.norm(d, dim=-1, keepdim=True)
-
-    if rest_positions is not None:
-        d_u = rest_positions[src] - rest_positions[dst]
-        d_u_norm = torch.norm(d_u, dim=-1, keepdim=True)
-    else:
-        d_u = torch.zeros_like(d)
-        d_u_norm = torch.zeros_like(d_norm)
-
-    e_attr = torch.cat([d, d_norm, d_u, d_u_norm], dim=-1)
-    e_attr = _match_feature_dim(e_attr, edge_dim_target)
-
-    # -------------------------
-    # Apply normalization
-    # -------------------------
-    if x_mean is not None and x_std is not None:
-        x_node = (x_node - x_mean) / x_std
-
-    if e_mean is not None and e_std is not None:
-        e_attr = (e_attr - e_mean) / e_std
-
-    return x_node, e_attr
 
 
-def animate_rotated_with_velocities_and_edges(
+#This function displays an origional trajectory aswell as a randomly rotated version of the same trajectory, 
+#which is a common data augmentation technique used in training GNNs for physical systems.
+#This visualization is useful in determining if the augmentation is working properly, and also gives a visual 
+#intuition for how the trajectories change with different rotations.
+def animate_augmented_data(
     Wall,
     throw_number,
     nodes_per_edge=2,
@@ -427,13 +462,8 @@ def animate_rotated_with_velocities_and_edges(
     interval=50,
     save_path=None
 ):
-    """
-        Debug animation that mirrors train-time augmentation:
-            - rotate node velocity vectors like train_gnn.rotate_batch
-            - rotate edge features [d, d_norm, dU, dU_norm] like train_gnn.rotate_batch
-            - draw edges from edge_feat displacement d (not from node-node geometry)
-    """
 
+    #Generates the node features, edge features, edge indices, and positions for the specified trajectory in the dataset,
     node_feat, edge_feat, edge_index, positions = get_gns_features(
         Wall,
         throw_number,
@@ -441,24 +471,23 @@ def animate_rotated_with_velocities_and_edges(
         h=h
     )
 
+    #Moves the positions, edge indices, node features, and edge features to the CPU for plotting with Matplotlib.
     positions = positions.cpu()
     edge_index = edge_index.cpu()
     node_feat = node_feat.cpu()
     edge_feat = edge_feat.cpu()
 
-    # ---- Velocities from node features ----
-    # train_gnn.rotate_batch rotates only first 6 dims (two 3D vectors)
-    if node_feat.shape[-1] >= 6:
-        velocities = node_feat[:, :, 0:6].reshape(
-            node_feat.shape[0],
-            node_feat.shape[1],
-            2,
-            3
-        ).sum(dim=2)
-    else:
-        velocities = torch.zeros_like(positions)
+    
+    #Extracts the velocities from the node features, which are assumed to be in the first 6 dimensions
+    #of the node features (3 for velocity and 3 for previous velocity).
+    velocities = node_feat[:, :, 0:6].reshape(
+        node_feat.shape[0],
+        node_feat.shape[1],
+        2,
+        3
+    ).sum(dim=2)
 
-    # ---- Rotation ----
+    #Applies a random rotation around the Z-axis to the positions and velocities to create an augmented version of the trajectory.
     theta = torch.rand(1) * 2 * torch.pi
     c = torch.cos(theta)
     s = torch.sin(theta)
@@ -469,40 +498,45 @@ def animate_rotated_with_velocities_and_edges(
         [0,  0, 1]
     ]).squeeze()
 
+    #Rotates the positions and velocities using the rotation matrix R, which is applied to each position and velocity vector
+    #in the trajectory.
     pos_rot = positions @ R.T
     vel_rot = velocities @ R.T
 
-    # ---- Rotate edge features exactly like train_gnn.rotate_batch ----
-    # edge_feat = [d, d_norm, dU, dU_norm]
-    if edge_feat.shape[-1] >= 8:
-        d = edge_feat[:, :, 0:3]
-        d_norm = edge_feat[:, :, 3:4]
-        d_u = edge_feat[:, :, 4:7]
-        d_u_norm = edge_feat[:, :, 7:8]
+    
+    #Extracts the edge features for the distance vectors and their norms, which are assumed to be in the first 8 dimensions
+    d = edge_feat[:, :, 0:3]
+    d_norm = edge_feat[:, :, 3:4]
+    d_u = edge_feat[:, :, 4:7]
+    d_u_norm = edge_feat[:, :, 7:8]
 
-        d_rot = d @ R.T
-        d_u_rot = d_u @ R.T
+    #Applies the same rotation to the edge features for the distance vectors, which ensures that the edges are consistent 
+    #with the rotated positions.
+    d_rot = d @ R.T
+    d_u_rot = d_u @ R.T
 
-        edge_feat_rot = torch.cat([d_rot, d_norm, d_u_rot, d_u_norm], dim=-1)
-    else:
-        edge_feat_rot = edge_feat
+    #Combines the rotated edge features back into a single tensor, which will be used for drawing the edges in the animation.
+    edge_feat_rot = torch.cat([d_rot, d_norm, d_u_rot, d_u_norm], dim=-1)
 
-    # Edge vectors used for drawing (must come from edge_feat, not node positions)
-    edge_d = edge_feat[:, :, 0:3] if edge_feat.shape[-1] >= 3 else None
-    edge_d_rot = edge_feat_rot[:, :, 0:3] if edge_feat_rot.shape[-1] >= 3 else None
+    #Extracts the distance vectors from the edge features for both the original and rotated trajectories, 
+    #which will be used to draw the edges in the animation.
+    edge_d = edge_feat[:, :, 0:3] 
+    edge_d_rot = edge_feat_rot[:, :, 0:3]
 
-    # Convert to numpy
+    #Converts the positions, velocities, and edge features to numpy arrays for plotting with Matplotlib.
     positions = positions.numpy()
     pos_rot = pos_rot.numpy()
     velocities = velocities.numpy()
     vel_rot = vel_rot.numpy()
-    edge_d = edge_d.numpy() if edge_d is not None else None
-    edge_d_rot = edge_d_rot.numpy() if edge_d_rot is not None else None
+    edge_d = edge_d.numpy()
+    edge_d_rot = edge_d_rot.numpy()
 
+    #Sets up the figure and 3D axis for the animation
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
-    # Set limits
+    #Combines the original and rotated positions into a single array to compute the limits for the 3D plot, 
+    #which ensures that both trajectories are fully visible in the plot.
     all_pos = torch.cat([torch.tensor(positions),
                          torch.tensor(pos_rot)], dim=0)
 
@@ -510,21 +544,27 @@ def animate_rotated_with_velocities_and_edges(
     ax.set_ylim(all_pos[:, :, 1].min(), all_pos[:, :, 1].max())
     ax.set_zlim(all_pos[:, :, 2].min(), all_pos[:, :, 2].max())
 
+
+
+    #Sets axis labels and title for the plot
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
-
     ax.set_title("Blue = Original | Red = Rotated")
 
+    #This function updates the positions of the nodes, the edges, and the velocity vectors for both the original 
+    #and rotated trajectories for each frame of the animation.
     def update(frame):
-        ax.cla()  # 🔥 Proper 3D clear
 
-        # Re-set limits after clearing
+        #Clears the current plot to prepare for drawing the new positions and edges for the current frame.
+        ax.cla() 
+
+        #Re-set limits after clearing
         ax.set_xlim(all_pos[:, :, 0].min(), all_pos[:, :, 0].max())
         ax.set_ylim(all_pos[:, :, 1].min(), all_pos[:, :, 1].max())
         ax.set_zlim(all_pos[:, :, 2].min(), all_pos[:, :, 2].max())
 
-        # Plot nodes
+        #Plots nodes for original trajectory in blue and rotated trajectory in red for the current frame of the animation.
         ax.scatter(
             positions[frame, :, 0],
             positions[frame, :, 1],
@@ -539,8 +579,8 @@ def animate_rotated_with_velocities_and_edges(
             c='r'
         )
 
-        # Plot edges from edge_feat displacement d using sender anchor.
-        # For each edge: d = x_sender - x_receiver, so receiver = sender - d.
+        #Plots edges from edge_feat displacement d using sender anchor.
+        #For each edge: d = x_sender - x_receiver, so receiver = sender - d.
         if edge_d is not None and edge_d_rot is not None:
             for i in range(edge_index.shape[1]):
                 src = int(edge_index[0, i])
@@ -567,7 +607,8 @@ def animate_rotated_with_velocities_and_edges(
                     alpha=0.3
                 )
 
-        # Velocity vectors
+        #Plots velocity vectors for the original and rotated trajectories using quiver, 
+        #which draws arrows representing the velocity at each node.
         ax.quiver(
             positions[frame, :, 0],
             positions[frame, :, 1],
@@ -592,6 +633,8 @@ def animate_rotated_with_velocities_and_edges(
             normalize=True
         )
 
+    #Creates the animation using Matplotlib's FuncAnimation, which calls the update function for each 
+    #frame of the animation to update the plot with the new positions, edges, and velocity vectors.
     ani = animation.FuncAnimation(
         fig,
         update,
@@ -600,7 +643,11 @@ def animate_rotated_with_velocities_and_edges(
         blit=False
     )
 
+    #Sets the axis equal so the scales of each axis are the same, which ensures that the trajectories are not distorted in the plot.
     ax.set_aspect('equal')
+
+
+    #Saves the animation as a gif
     if save_path is not None:
         print(f"Saving animation to {save_path}...")
         ani.save(save_path, writer='pillow', fps=1000 // interval)
