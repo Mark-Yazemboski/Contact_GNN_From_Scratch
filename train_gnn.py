@@ -44,31 +44,46 @@ class GNSLayer(nn.Module):
     #The forward function defines how the data flows through the layer. It takes the node features x, edge indices,
     #and edge attributes as input, and outputs the updated node features.
     def forward(self, x, edge_index, edge_attr):
-
+        
+        #Gets the sender and receiver node indices from the edge_index, which is a tensor of shape [2, num_edges]
+        #  where the first row contains the sender node indices and the second row contains the receiver node indices for each edge.
         senders = edge_index[0]
         receivers = edge_index[1]
 
+        #Extracts the sender node features and receiver node features based on the sender and receiver indices,
         sender_features = x[senders]
         receiver_features = x[receivers]
 
+        #Concatenates the sender node features, receiver node features, and edge attributes to form the input for the edge MLP.
         edge_input = torch.cat(
             [sender_features, receiver_features, edge_attr], dim=-1
         )
 
+        #Processes the edge input through the edge MLP to get the edge updates, and applies layer normalization to the edge updates.
         edge_update = self.edge_mlp(edge_input)
         edge_update = self.edge_norm(edge_update)
 
+        #Updates the edge attributes by adding the edge updates to the original edge attributes.
         edge_attr = edge_attr + edge_update
 
+        #Gets the number of nodes and the hidden dimension from the input tensors. 
         num_nodes = x.size(0)
         hidden_dim = edge_attr.size(1)
 
+        #Preallocates a tensor for aggregating messages for each node, initialized to zeros.
         node_agg = torch.zeros(num_nodes, hidden_dim, device=x.device)
+
+        #Aggregates the edge updates for each receiver node by adding the edge updates to the corresponding receiver nodes in the
+        #node_agg tensor.
         node_agg.index_add_(0, receivers, edge_attr)
 
+        #Concatenates the original node features with the aggregated messages to form the input for the node MLP.
         node_input = torch.cat([x, node_agg], dim=-1)
+
+        #Processes the node input through the node MLP to get the node updates.
         node_update = self.node_mlp(node_input)
 
+        #Updates the node features by adding the node updates to the original node features, and applies layer normalization to the updated node features.
         x = x + node_update
         x = self.node_norm(x)
 
@@ -133,7 +148,8 @@ class GNSModel(nn.Module):
         edge_attr = self.edge_encoder(data.edge_attr)
 
         #Next the encoded node features and edge features are passed through the processor, 
-        #which consists of multiple GNS layers.
+        #which consists of multiple GNS layers. This will update the nodes features based on the edge features 
+        #and the structure of the graph.
         for layer in self.processor:
             x, edge_attr = layer(x, data.edge_index, edge_attr)
 
