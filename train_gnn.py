@@ -44,69 +44,35 @@ class GNSLayer(nn.Module):
     #The forward function defines how the data flows through the layer. It takes the node features x, edge indices,
     #and edge attributes as input, and outputs the updated node features.
     def forward(self, x, edge_index, edge_attr):
-        """
-        x:           [num_nodes, node_dim]
-        edge_index:  [2, num_edges]
-                    edge_index[0] = senders
-                    edge_index[1] = receivers
-        edge_attr:   [num_edges, edge_dim]
-        """
 
-        #Extracts the sender and receiver node indices from the edge_index tensor.
         senders = edge_index[0]
         receivers = edge_index[1]
 
-        # --------------------------------------------------
-        # 1️⃣ EDGE UPDATE
-        # --------------------------------------------------
-
-        #For each edge, the sender and receiver node features are gathered based on the sender and receiver indices.
         sender_features = x[senders]
         receiver_features = x[receivers]
 
-        #The edge features are updated by concatenating the sender node features, receiver node features, and edge attributes for
-        #each edge, and passing this through the edge MLP. 
         edge_input = torch.cat(
             [sender_features, receiver_features, edge_attr], dim=-1
         )
-        edge_messages = self.edge_mlp(edge_input)
 
-        #The output is then normalized using layer normalization.
-        edge_messages = self.edge_norm(edge_messages)
+        edge_update = self.edge_mlp(edge_input)
+        edge_update = self.edge_norm(edge_update)
 
-        # --------------------------------------------------
-        # 2️⃣ AGGREGATION (SUM over incoming edges)
-        # --------------------------------------------------
+        edge_attr = edge_attr + edge_update
 
-        #Gets the number of nodes from the input node features, and initializes a tensor to hold the aggregated messages
-        # for each node.
         num_nodes = x.size(0)
+        hidden_dim = edge_attr.size(1)
 
-        hidden_dim = edge_messages.size(1)
+        node_agg = torch.zeros(num_nodes, hidden_dim, device=x.device)
+        node_agg.index_add_(0, receivers, edge_attr)
 
-        node_agg = torch.zeros(
-            num_nodes, hidden_dim, device=x.device
-        )
-
-        #The edge messages are aggregated for each receiver node by summing the messages from all incoming edges.
-        node_agg.index_add_(0, receivers, edge_messages)
-
-        # --------------------------------------------------
-        # 3️⃣ NODE UPDATE
-        # --------------------------------------------------
-
-        #The node features are updated by concatenating the original node features with the aggregated messages
         node_input = torch.cat([x, node_agg], dim=-1)
-
-        #The concatenated features are passed through the node MLP to get the node updates
         node_update = self.node_mlp(node_input)
 
-        #Node features are updated by adding the node updates to the original node features, 
-        #and then normalized using layer normalization.
         x = x + node_update
         x = self.node_norm(x)
 
-        return x
+        return x, edge_attr
 
 
 #This is the full encoder-processor-decoder model
@@ -169,7 +135,7 @@ class GNSModel(nn.Module):
         #Next the encoded node features and edge features are passed through the processor, 
         #which consists of multiple GNS layers.
         for layer in self.processor:
-            x = layer(x, data.edge_index, edge_attr)
+            x, edge_attr = layer(x, data.edge_index, edge_attr)
 
         #Finally, the processed node features are passed through the decoder MLP to get the predicted accelerations for each node.
         decoded_state = self.decoder(x)
@@ -303,7 +269,7 @@ def train_gnn(Wall,
               save_model_path,
               rebuild_datasets = False,
               epochs=50,
-              batch_size=8,
+              batch_size=64,
               lr=1e-4,
               nodes_per_edge=5,
               message_passing_layers=2):

@@ -26,19 +26,19 @@ nodes_per_edge = 2
 
 #Sets the number of message passing layers in the GNN model. The paper doesn't say how many they used, 
 #but 3 is a common choice for GNNs and should be sufficient for this task.
-message_passing_layers = 3
+message_passing_layers = 10
 
 #Sets which visuals you want to turn on.
 #Meshed cube shows the initial node positions and edges. 
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 show_meshed_cube = True
-show_augmentation = True
+show_augmentation = False
 show_rollout = True
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
 
 #Trains the GNN model
 if Train:
@@ -54,7 +54,7 @@ if Train:
         save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
         save_model_path="models/gns_model.pt", 
         rebuild_datasets=True,
-        epochs=2500, 
+        epochs=400, 
         batch_size=64, 
         lr=1e-4,
         nodes_per_edge=nodes_per_edge,
