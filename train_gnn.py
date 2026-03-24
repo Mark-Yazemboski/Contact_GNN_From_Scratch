@@ -287,7 +287,8 @@ def train_gnn(Wall,
               nodes_per_edge=5,
               nearest_neighbors=3,
               message_passing_layers=5,
-              repeat_blocks=1):
+              repeat_blocks=1,
+              resume_checkpoint_path=None):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -358,6 +359,23 @@ def train_gnn(Wall,
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
+    #Optionally resume training from a previous checkpoint.
+    start_epoch = 0
+    if resume_checkpoint_path is not None:
+        checkpoint = torch.load(resume_checkpoint_path, map_location=device, weights_only=False)
+
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+            start_epoch = int(checkpoint.get("epoch", -1)) + 1
+            print(f"Resumed training from checkpoint {resume_checkpoint_path} at epoch {start_epoch}")
+        else:
+            model.load_state_dict(checkpoint)
+            print(f"Loaded model weights from {resume_checkpoint_path}")
+
     #Sets the loss function to mean squared error loss, which will be used to compute the loss between the
     # predicted accelerations and the target accelerations during training.
     loss_fn = nn.MSELoss()
@@ -367,7 +385,7 @@ def train_gnn(Wall,
     print(f"  Epochs: {epochs} | Batch size: {batch_size} | LR: {lr}")
 
     #Training loop
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         
         #Resets total loss for the epoch
         model.train()
@@ -424,11 +442,24 @@ def train_gnn(Wall,
         else:
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f}")
+            
+        if (epoch + 1) % 500 == 0:
+            checkpoint_path = os.path.splitext(save_model_path)[0] + f"_epoch{epoch+1}.pt"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                checkpoint_path,
+            )
+            print(f"Checkpoint saved to {checkpoint_path}")
 
 
     #Saves the trained model
-    torch.save(model.state_dict(), save_model_path)
-    print(f"Model saved to {save_model_path}")
+    checkpoint_path = os.path.splitext(save_model_path)[0] + f"_final.pt"
+    torch.save(model.state_dict(), checkpoint_path)
+    print(f"Model saved to {checkpoint_path}")
 
     return model
 

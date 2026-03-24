@@ -8,6 +8,7 @@ from train_gnn import GNSModel
 import display_results 
 import evaluate_metrics
 import random
+import os
 
 #This is the real blocks width from the paper. This is used to unnormalize the data that they provide in the trajectories,
 #And also create the node positions relitive to the COM data that they provide.
@@ -70,6 +71,16 @@ show_rollout = True
 #run the visualizations without having to retrain the model every time you run the code.
 Train = False
 
+#Model save/load settings.
+save_model_path = "models/gns_model.pt"
+
+#Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
+resume_training_checkpoint_path = None
+
+#Set this to a checkpoint file or model file to load for inference.
+#If None, the script will load the final model saved after training.
+inference_model_path = None
+
 #Trains the GNN model
 if Train:
     #Trains the Gnn using parameters like the floor object, number of trajectories, 
@@ -82,7 +93,7 @@ if Train:
         val_range=val_range,
         save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
         save_val_dataset_path="data/pytorch_datasets/gns_val_dataset.pt",
-        save_model_path="models/gns_model.pt", 
+        save_model_path=save_model_path,
         rebuild_datasets=True,
         epochs=epochs, 
         batch_size=batch_size, 
@@ -90,7 +101,8 @@ if Train:
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
         message_passing_layers=message_passing_layers,
-        repeat_blocks=repeat_blocks
+        repeat_blocks=repeat_blocks,
+        resume_checkpoint_path=resume_training_checkpoint_path,
     )
 
 
@@ -115,12 +127,25 @@ nodes_body = torch.tensor(
 #Loads the trained GNN model from the saved file, and sets it to evaluation mode. 
 #This model will be used for the rollouts and visualizations later in the code.
 model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K=repeat_blocks)
-model.load_state_dict(torch.load("models/gns_model.pt", map_location=device))
+
+if inference_model_path is None:
+    load_model_path = os.path.splitext(save_model_path)[0] + "_final.pt"
+else:
+    load_model_path = inference_model_path
+
+loaded_obj = torch.load(load_model_path, map_location=device, weights_only=False)
+if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
+    model.load_state_dict(loaded_obj["model_state_dict"])
+else:
+    model.load_state_dict(loaded_obj)
+
 model.to(device)
 model.eval()
 
 #This loads the normalization statistics that were used to normalize the data during training.
-norm_stats = torch.load("models/gns_model_norms.pt", map_location=device)
+
+norm_stats_path = os.path.splitext(save_model_path)[0] + "_norms.pt"
+norm_stats = torch.load(norm_stats_path, map_location=device)
 x_mean = norm_stats["x_mean"]
 x_std = norm_stats["x_std"]
 e_mean = norm_stats["e_mean"]
