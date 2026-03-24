@@ -2,6 +2,8 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import random
+import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from generate_node_states import get_gns_features
@@ -295,6 +297,9 @@ def train_gnn(Wall,
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    if resume_checkpoint_path is not None and rebuild_datasets:
+        print("Warning: resuming with rebuild_datasets=True can cause large loss jumps due to new data/noise.")
+
     #If the user wants to rebuild the datasets, it processes the trajectories to build the training and test datasets, 
     #and saves them.
     if rebuild_datasets:
@@ -372,6 +377,19 @@ def train_gnn(Wall,
             if "optimizer_state_dict" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
+            # Restore RNG states when available for closer continuation from checkpoint.
+            if "torch_rng_state" in checkpoint:
+                torch.set_rng_state(checkpoint["torch_rng_state"])
+
+            if torch.cuda.is_available() and "cuda_rng_state_all" in checkpoint and checkpoint["cuda_rng_state_all"] is not None:
+                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state_all"])
+
+            if "numpy_rng_state" in checkpoint:
+                np.random.set_state(checkpoint["numpy_rng_state"])
+
+            if "python_rng_state" in checkpoint:
+                random.setstate(checkpoint["python_rng_state"])
+
             start_epoch = int(checkpoint.get("epoch", -1)) + 1
             print(f"Resumed training from checkpoint {resume_checkpoint_path} at epoch {start_epoch}")
         else:
@@ -381,6 +399,19 @@ def train_gnn(Wall,
     #Sets the loss function to mean squared error loss, which will be used to compute the loss between the
     # predicted accelerations and the target accelerations during training.
     loss_fn = nn.MSELoss()
+
+    #Track losses over training. Validation is sparse, so keep separate epoch/loss lists.
+    train_loss_epochs = []
+    train_loss_values = []
+    val_loss_epochs = []
+    val_loss_values = []
+
+    #If resuming and history exists in checkpoint, continue appending.
+    if resume_checkpoint_path is not None and isinstance(checkpoint, dict):
+        train_loss_epochs = list(checkpoint.get("train_loss_epochs", train_loss_epochs))
+        train_loss_values = list(checkpoint.get("train_loss_values", train_loss_values))
+        val_loss_epochs = list(checkpoint.get("val_loss_epochs", val_loss_epochs))
+        val_loss_values = list(checkpoint.get("val_loss_values", val_loss_values))
 
     print("Starting training...")
     print(f"  Train samples: {len(dataset_train)} | Val samples: {len(dataset_val)}")
@@ -422,6 +453,9 @@ def train_gnn(Wall,
 
         #Averages loss over the epoch
         avg_train_loss = total_loss / len(loader)
+        epoch_num = epoch + 1
+        train_loss_epochs.append(epoch_num)
+        train_loss_values.append(float(avg_train_loss))
 
         if epoch % validation_check_interval == 0:
             # --- Validation ---
@@ -437,6 +471,8 @@ def train_gnn(Wall,
                     total_val_loss += loss.item()
 
             avg_val_loss = total_val_loss / len(val_loader)
+            val_loss_epochs.append(epoch_num)
+            val_loss_values.append(float(avg_val_loss))
 
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f} | "
@@ -452,6 +488,14 @@ def train_gnn(Wall,
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "torch_rng_state": torch.get_rng_state(),
+                    "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    "numpy_rng_state": np.random.get_state(),
+                    "python_rng_state": random.getstate(),
+                    "train_loss_epochs": train_loss_epochs,
+                    "train_loss_values": train_loss_values,
+                    "val_loss_epochs": val_loss_epochs,
+                    "val_loss_values": val_loss_values,
                 },
                 checkpoint_path,
             )
@@ -462,6 +506,20 @@ def train_gnn(Wall,
     checkpoint_path = os.path.splitext(save_model_path)[0] + f"_final.pt"
     torch.save(model.state_dict(), checkpoint_path)
     print(f"Model saved to {checkpoint_path}")
+
+    #Persist full loss history for plotting after training.
+    loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
+    torch.save(
+        {
+            "train_loss_epochs": train_loss_epochs,
+            "train_loss_values": train_loss_values,
+            "val_loss_epochs": val_loss_epochs,
+            "val_loss_values": val_loss_values,
+            "validation_check_interval": validation_check_interval,
+        },
+        loss_history_path,
+    )
+    print(f"Loss history saved to {loss_history_path}")
 
     return model
 

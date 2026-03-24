@@ -76,6 +76,9 @@ Train = False
 #Model save/load settings.
 save_model_path = "models/gns_model.pt"
 
+#Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
+rebuild_datasets = True
+
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
 resume_training_checkpoint_path = None
 
@@ -85,6 +88,10 @@ inference_model_path = None
 
 #Trains the GNN model
 if Train:
+    if resume_training_checkpoint_path is not None and rebuild_datasets:
+        print("Resume checkpoint detected. Forcing rebuild_datasets=False for consistent continuation.")
+        rebuild_datasets = False
+
     #Trains the Gnn using parameters like the floor object, number of trajectories, 
     # where to save the datasets and model, whether to rebuild the datasets,
     # training epochs, batch size, learning rate, and GNN architecture parameters
@@ -96,7 +103,7 @@ if Train:
         save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
         save_val_dataset_path="data/pytorch_datasets/gns_val_dataset.pt",
         save_model_path=save_model_path,
-        rebuild_datasets=True,
+        rebuild_datasets=rebuild_datasets,
         epochs=epochs, 
         batch_size=batch_size, 
         lr=1e-4,
