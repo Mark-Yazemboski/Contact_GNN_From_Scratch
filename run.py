@@ -56,6 +56,8 @@ epochs = int(steps / (Num_train_trajectories * traj_timesteps / batch_size))
 print("Training for {} epochs".format(epochs))
 
 epochs = 400
+epoch_checkpoint_interval = 500
+validation_check_interval = 20
 
 #Sets which visuals you want to turn on.
 #Meshed cube shows the initial node positions and edges. 
@@ -103,6 +105,8 @@ if Train:
         message_passing_layers=message_passing_layers,
         repeat_blocks=repeat_blocks,
         resume_checkpoint_path=resume_training_checkpoint_path,
+        epoch_checkpoint_interval=epoch_checkpoint_interval,
+        validation_check_interval = validation_check_interval
     )
 
 

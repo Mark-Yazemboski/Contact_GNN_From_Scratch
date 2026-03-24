@@ -288,7 +288,9 @@ def train_gnn(Wall,
               nearest_neighbors=3,
               message_passing_layers=5,
               repeat_blocks=1,
-              resume_checkpoint_path=None):
+              resume_checkpoint_path=None,
+              epoch_checkpoint_interval=500,
+              validation_check_interval=20):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -421,7 +423,7 @@ def train_gnn(Wall,
         #Averages loss over the epoch
         avg_train_loss = total_loss / len(loader)
 
-        if epoch % 20 == 0:
+        if epoch % validation_check_interval == 0:
             # --- Validation ---
             model.eval()
             total_val_loss = 0.0
@@ -443,7 +445,7 @@ def train_gnn(Wall,
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f}")
             
-        if (epoch + 1) % 500 == 0:
+        if (epoch + 1) % epoch_checkpoint_interval == 0:
             checkpoint_path = os.path.splitext(save_model_path)[0] + f"_epoch{epoch+1}.pt"
             torch.save(
                 {
