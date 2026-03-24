@@ -55,18 +55,20 @@ epochs = int(steps / (Num_train_trajectories * traj_timesteps / batch_size))
 
 print("Training for {} epochs".format(epochs))
 
-epochs = 400
-epoch_checkpoint_interval = 500
+epochs = 200
+epoch_checkpoint_interval = 100
 validation_check_interval = 20
 
 #Sets which visuals you want to turn on.
 #Meshed cube shows the initial node positions and edges. 
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
+display_loss_curves = True
 display_stats = False
 show_meshed_cube = True
 show_augmentation = False
 show_rollout = True
+
 
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
@@ -80,7 +82,7 @@ save_model_path = "models/gns_model.pt"
 rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
-resume_training_checkpoint_path = None
+resume_training_checkpoint_path = "models/gns_model_epoch100.pt"
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
@@ -163,6 +165,35 @@ e_mean = norm_stats["e_mean"]
 e_std = norm_stats["e_std"]
 accel_std = norm_stats["acc_std"]
 accel_mean = norm_stats["acc_mean"]
+
+#Load saved loss history for plotting.
+loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
+train_loss_epochs = []
+train_loss_values = []
+val_loss_epochs = []
+val_loss_values = []
+
+if os.path.exists(loss_history_path):
+    loss_history = torch.load(loss_history_path, map_location="cpu", weights_only=False)
+    train_loss_epochs = list(loss_history.get("train_loss_epochs", []))
+    train_loss_values = list(loss_history.get("train_loss_values", []))
+    val_loss_epochs = list(loss_history.get("val_loss_epochs", []))
+    val_loss_values = list(loss_history.get("val_loss_values", []))
+    print(f"Loaded loss history from {loss_history_path}")
+else:
+    print(f"Loss history file not found: {loss_history_path}")
+
+if display_loss_curves:
+    os.makedirs("Plots", exist_ok=True)
+    evaluate_metrics.plot_loss_curves(
+        train_loss_epochs=train_loss_epochs,
+        train_loss_values=train_loss_values,
+        val_loss_epochs=val_loss_epochs,
+        val_loss_values=val_loss_values,
+        title="Training and Validation Loss",
+        save_path="Plots/loss_curve.png",
+        show_plot=True
+    )
 
 
 if display_stats:

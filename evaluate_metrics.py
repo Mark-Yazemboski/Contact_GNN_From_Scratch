@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
 from display_results import rollout_trajectory_feedback_shape_match
 
 BLOCK_HALF_WIDTH = 0.0524
@@ -138,3 +139,57 @@ def evaluate_model(model, Wall, test_trajectory_indices, nodes_per_edge,
         'angle_error_deg':   np.mean(all_angle_errors),
         'floor_penetration': np.mean(all_floor_penetrations),
     }
+
+
+def plot_loss_curves(
+    train_loss_epochs,
+    train_loss_values,
+    val_loss_epochs=None,
+    val_loss_values=None,
+    title="Training and Validation Loss",
+    save_path=None,
+    show_plot=True,
+):
+    """
+    Plots loss vs epoch curves.
+
+    Validation can be logged less frequently than training, so it has its own
+    epoch list (val_loss_epochs).
+    """
+    if len(train_loss_epochs) != len(train_loss_values):
+        raise ValueError("train_loss_epochs and train_loss_values must have same length")
+
+    if val_loss_epochs is not None and val_loss_values is not None:
+        if len(val_loss_epochs) != len(val_loss_values):
+            raise ValueError("val_loss_epochs and val_loss_values must have same length")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ax.plot(train_loss_epochs, train_loss_values, label="Train Loss", linewidth=2.0)
+
+    if val_loss_epochs is not None and val_loss_values is not None and len(val_loss_epochs) > 0:
+        ax.plot(
+            val_loss_epochs,
+            val_loss_values,
+            label="Validation Loss",
+            linewidth=2.0,
+            marker="o",
+            markersize=4,
+        )
+
+    ax.set_title(title)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        print(f"Saved loss curve to {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig, ax

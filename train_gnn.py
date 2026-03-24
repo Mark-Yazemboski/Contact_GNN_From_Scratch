@@ -366,6 +366,13 @@ def train_gnn(Wall,
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
+    def _coerce_cpu_byte_tensor(state):
+        if state is None:
+            return None
+        if torch.is_tensor(state):
+            return state.detach().to(device="cpu", dtype=torch.uint8).contiguous()
+        return torch.as_tensor(state, dtype=torch.uint8, device="cpu").contiguous()
+
     #Optionally resume training from a previous checkpoint.
     start_epoch = 0
     if resume_checkpoint_path is not None:
@@ -379,10 +386,21 @@ def train_gnn(Wall,
 
             # Restore RNG states when available for closer continuation from checkpoint.
             if "torch_rng_state" in checkpoint:
-                torch.set_rng_state(checkpoint["torch_rng_state"])
+                try:
+                    torch_state = _coerce_cpu_byte_tensor(checkpoint["torch_rng_state"])
+                    if torch_state is not None:
+                        torch.set_rng_state(torch_state)
+                except Exception as exc:
+                    print(f"Warning: could not restore torch RNG state: {exc}")
 
             if torch.cuda.is_available() and "cuda_rng_state_all" in checkpoint and checkpoint["cuda_rng_state_all"] is not None:
-                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state_all"])
+                try:
+                    cuda_states = [
+                        _coerce_cpu_byte_tensor(s) for s in checkpoint["cuda_rng_state_all"]
+                    ]
+                    torch.cuda.set_rng_state_all(cuda_states)
+                except Exception as exc:
+                    print(f"Warning: could not restore CUDA RNG states: {exc}")
 
             if "numpy_rng_state" in checkpoint:
                 np.random.set_state(checkpoint["numpy_rng_state"])
