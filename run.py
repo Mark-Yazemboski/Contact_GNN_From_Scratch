@@ -1,3 +1,5 @@
+from random import random
+
 import torch
 import wall
 import train_gnn
@@ -5,6 +7,7 @@ import generate_node_states
 from train_gnn import GNSModel
 import display_results 
 import evaluate_metrics
+import random
 
 #This is the real blocks width from the paper. This is used to unnormalize the data that they provide in the trajectories,
 #And also create the node positions relitive to the COM data that they provide.
@@ -60,7 +63,7 @@ epochs = 400
 display_stats = False
 show_meshed_cube = True
 show_augmentation = False
-show_rollout = False
+show_rollout = True
 
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
@@ -143,9 +146,11 @@ if show_meshed_cube:
 #This is usefull in detemrining if the augmentation is working properly, 
 #and also gives a visual intuition for how the trajectories change with different rotations.
 if show_augmentation:
+    throw_number = random.choice(test_range)
+    print("Showing augmentation for trajectory number: ", throw_number)
     display_results.animate_augmented_data(
         Floor,
-        throw_number=0,
+        throw_number=throw_number,
         save_path="Gifs/Showing_Rotated_Cube.gif",
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
@@ -155,10 +160,13 @@ if show_augmentation:
 #This will show the model's predictions when rolled out over a trajectory,
 #with shape matching to the true positions at each step.
 if show_rollout:
+
+    throw_number = random.choice(test_range)
+    print("Showing rollout for trajectory number: ", throw_number)
     pred_positions, true_positions, edge_info = display_results.rollout_trajectory_feedback_shape_match(
         model,
         Floor,
-        throw_number=0,
+        throw_number=throw_number,
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
         rest_positions=nodes_body,

@@ -1,2 +1,5 @@
-/data/pytorch_datasets/
-/models/
+/models/*
+!/models/.gitkeep
+
+/data/pytorch_datasets/*
+!/data/pytorch_datasets/.gitkeep
