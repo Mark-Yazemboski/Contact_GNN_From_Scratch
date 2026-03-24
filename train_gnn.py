@@ -96,8 +96,13 @@ class GNSModel(nn.Module):
     #Initializes the GNS model with the dimensions of the node features, edge features, a latent dimension for the MLPs,
     # and the number of message passing layers.
     def __init__(self, node_in_dim, edge_in_dim,
-                 latent_dim=128, num_layers=1):
+                 latent_dim=128, L = 5, K = 1):
         super().__init__()
+
+        #Initialize the number of message passing steps (L) and number of repeated blocks (K)
+        self.K = K
+        self.L = L
+
 
         #Node encoder. Takes in the raw node features and encodes them into a latent space using an MLP. 
         #The output of the encoder is used as the initial node features for the message passing layers.
@@ -117,18 +122,11 @@ class GNSModel(nn.Module):
             nn.LayerNorm(latent_dim)
         )
 
-        #This is the processor, which consists of multiple GNS layers stacked together. 
-        #Each layer takes the node features and edge features, and performs message passing to update the node features. 
-        #The number of layers is determined by the num_layers parameter.
-        self.processor = nn.ModuleList()
-        for _ in range(num_layers):
-            self.processor.append(
-                GNSLayer(
-                    node_dim=latent_dim,
-                    edge_dim=latent_dim,
-                    hidden_dim=latent_dim
-                )
-            )
+        #ADD COMMENT -------------------------------------------------------------------------------------
+        self.processor_layers = nn.ModuleList([
+            GNSLayer(latent_dim, latent_dim, latent_dim)
+            for _ in range(L)
+        ])
 
         #Decoder (NO LayerNorm per paper) Takes the 128 dimentional node features and decodes them into 
         #x,y,z accelration, using a MLP.
@@ -147,11 +145,10 @@ class GNSModel(nn.Module):
         x = self.node_encoder(data.x)
         edge_attr = self.edge_encoder(data.edge_attr)
 
-        #Next the encoded node features and edge features are passed through the processor, 
-        #which consists of multiple GNS layers. This will update the nodes features based on the edge features 
-        #and the structure of the graph.
-        for layer in self.processor:
-            x, edge_attr = layer(x, data.edge_index, edge_attr)
+        #ADD COMMENT -------------------------------------------------------------------------------------
+        for _ in range(self.K):  
+            for layer in self.processor_layers: 
+                x, edge_attr = layer(x, data.edge_index, edge_attr)
 
         #Finally, the processed node features are passed through the decoder MLP to get the predicted accelerations for each node.
         decoded_state = self.decoder(x)
@@ -163,7 +160,7 @@ class GNSModel(nn.Module):
 #features and constructs a list of Data objects,
 def build_dataset(Wall, traj_range,
                   nodes_per_edge=5,
-                  nearest_neighbors=4,
+                  nearest_neighbors=3,
                   h=2):
 
     dataset = []
@@ -278,17 +275,19 @@ def rotate_batch(batch):
 
 #This function trains the GNS model
 def train_gnn(Wall,
-              num_trajectories_train,
-              num_trajectories_test,
+              train_range,
+              val_range,
               save_train_dataset_path,
-              save_test_dataset_path,
+              save_val_dataset_path,
               save_model_path,
-              rebuild_datasets = False,
+              rebuild_datasets=False,
               epochs=50,
               batch_size=64,
               lr=1e-4,
               nodes_per_edge=5,
-              message_passing_layers=2):
+              nearest_neighbors=3,
+              message_passing_layers=5,
+              repeat_blocks=1):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -296,29 +295,34 @@ def train_gnn(Wall,
     #If the user wants to rebuild the datasets, it processes the trajectories to build the training and test datasets, 
     #and saves them.
     if rebuild_datasets:
-        #BUILDS TRAINING DATASET
         print("Building training dataset...")
-        traj_range_train = range(num_trajectories_train)
-        dataset_train = build_dataset(Wall, traj_range_train,nodes_per_edge=nodes_per_edge)
+        dataset_train = build_dataset(
+            Wall,
+            train_range,
+            nodes_per_edge=nodes_per_edge,
+            nearest_neighbors=nearest_neighbors,
+        )
         torch.save(dataset_train, save_train_dataset_path)
-        print(f"Dataset saved to {save_train_dataset_path}")
+        print(f"Training dataset saved to {save_train_dataset_path}")
 
-        #BUILDS TEST DATASET
-        print("Building test dataset...")
-        #Test data set is just what's left over
-        traj_range_test = range(num_trajectories_train+1, num_trajectories_train + num_trajectories_test+1)
-        dataset_test = build_dataset(Wall, traj_range_test, nodes_per_edge=nodes_per_edge)
-        torch.save(dataset_test, save_test_dataset_path)
-        print(f"Test dataset saved to {save_test_dataset_path}")
+        print("Building validation dataset...")
+        dataset_val = build_dataset(
+            Wall,
+            val_range,
+            nodes_per_edge=nodes_per_edge,
+            nearest_neighbors=nearest_neighbors,
+        )
+        torch.save(dataset_val, save_val_dataset_path)
+        print(f"Validation dataset saved to {save_val_dataset_path}")
 
     else:
-        #If the user does not want to rebuild the datasets, it loads the training and test datasets from the specified paths.
         print("Loading training dataset...")
         dataset_train = torch.load(save_train_dataset_path, weights_only=False)
         print(f"Training dataset loaded from {save_train_dataset_path}")
-        print("Loading test dataset...")
-        dataset_test = torch.load(save_test_dataset_path, weights_only=False)
-        print(f"Test dataset loaded from {save_test_dataset_path}")
+
+        print("Loading validation dataset...")
+        dataset_val = torch.load(save_val_dataset_path, weights_only=False)
+        print(f"Validation dataset loaded from {save_val_dataset_path}")
 
     #Computes the mean and standard deviation for the node features, edge features, and target accelerations 
     #across the training dataset.
@@ -329,10 +333,9 @@ def train_gnn(Wall,
     #Applies normalization to the node features, edge features, and target accelerations in both the training and 
     #test datasets using the computed statistics.
     _apply_input_normalization(dataset_train, x_mean, x_std, e_mean, e_std)
-    _apply_input_normalization(dataset_test, x_mean, x_std, e_mean, e_std)
-
+    _apply_input_normalization(dataset_val, x_mean, x_std, e_mean, e_std)
     _apply_accel_normalization(dataset_train, acc_mean, acc_std)
-    _apply_accel_normalization(dataset_test, acc_mean, acc_std)
+    _apply_accel_normalization(dataset_val, acc_mean, acc_std)
 
     #saves the normalization statistics to a file, which can be used later for normalizing new data during inference.
     norm_stats_path = os.path.splitext(save_model_path)[0] + "_norms.pt"
@@ -342,6 +345,7 @@ def train_gnn(Wall,
 
     #Creates a DataLoader for the training dataset, which will handle batching and shuffling of the data during training.
     loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(dataset_val,   batch_size=batch_size, shuffle=False)
 
     #Gets input dimensions from the first data point
     node_dim = dataset_train[0].x.shape[1]
@@ -349,7 +353,7 @@ def train_gnn(Wall,
 
     #Initializes the GNS model, which consists of an encoder for the node features, an encoder for the edge features, 
     #multiple GNS layers for message passing,
-    model = GNSModel(node_dim, edge_dim, latent_dim=128, num_layers=message_passing_layers).to(device)
+    model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K = repeat_blocks).to(device)
 
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -359,11 +363,14 @@ def train_gnn(Wall,
     loss_fn = nn.MSELoss()
 
     print("Starting training...")
+    print(f"  Train samples: {len(dataset_train)} | Val samples: {len(dataset_val)}")
+    print(f"  Epochs: {epochs} | Batch size: {batch_size} | LR: {lr}")
 
     #Training loop
     for epoch in range(epochs):
         
         #Resets total loss for the epoch
+        model.train()
         total_loss = 0.0
 
         #Iterates through batches of data
@@ -394,10 +401,30 @@ def train_gnn(Wall,
             total_loss += loss.item()
 
         #Averages loss over the epoch
-        avg_loss = total_loss / len(loader)
+        avg_train_loss = total_loss / len(loader)
 
-        #Prints epoch loss
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.9f}")
+        if epoch % 20 == 0:
+            # --- Validation ---
+            model.eval()
+            total_val_loss = 0.0
+
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = batch.to(device)
+                    # No rotation augmentation at validation time
+                    pred_accel = model(batch)
+                    loss = loss_fn(pred_accel, batch.y)
+                    total_val_loss += loss.item()
+
+            avg_val_loss = total_val_loss / len(val_loader)
+
+            print(f"Epoch {epoch+1}/{epochs} | "
+                f"Train Loss: {avg_train_loss:.9f} | "
+                f"Val Loss: {avg_val_loss:.9f}")
+        else:
+            print(f"Epoch {epoch+1}/{epochs} | "
+                f"Train Loss: {avg_train_loss:.9f}")
+
 
     #Saves the trained model
     torch.save(model.state_dict(), save_model_path)

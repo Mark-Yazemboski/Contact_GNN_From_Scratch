@@ -4,6 +4,7 @@ import train_gnn
 import generate_node_states
 from train_gnn import GNSModel
 import display_results 
+import evaluate_metrics
 
 #This is the real blocks width from the paper. This is used to unnormalize the data that they provide in the trajectories,
 #And also create the node positions relitive to the COM data that they provide.
@@ -16,29 +17,55 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
 
 
-#Sets number of trajectories for training and testing
-Num_total_trajectories = 569
-Num_train_trajectories = 256
-Num_test_trajectories = Num_total_trajectories - Num_train_trajectories
+Num_total_trajectories = 570
+training_percentage = 0.5
+validation_percentage = 0.3
+testing_percentage = 0.2
+
+Num_train_trajectories = int(training_percentage * Num_total_trajectories)  # 285
+Num_validation_trajectories = int(validation_percentage * Num_total_trajectories)  # 171
+Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
+
+# Override for experiments with smaller training sets
+Num_train_trajectories = 4
+
+train_range = range(0, Num_train_trajectories)
+val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
+test_range  = range(Num_train_trajectories + Num_validation_trajectories, Num_total_trajectories)
+
 
 #Sets the number of nodes per edge. at 2 nodes per edge there is 8 nodes, each one at a corner of the cube.
 nodes_per_edge = 2
 
-#Sets the number of message passing layers in the GNN model. The paper doesn't say how many they used, 
-#but 3 is a common choice for GNNs and should be sufficient for this task.
+K_nearest_neighbors = 3
+
+#ADD COMMENT -------------------------------------------------------------------------------------
 message_passing_layers = 10
+repeat_blocks = 3
+
+batch_size=64
+
+steps = 1000000
+traj_timesteps = 100
+epochs = int(steps / (Num_train_trajectories * traj_timesteps / batch_size))
+
+print("Training for {} epochs".format(epochs))
+
+epochs = 400
 
 #Sets which visuals you want to turn on.
 #Meshed cube shows the initial node positions and edges. 
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
+display_stats = False
 show_meshed_cube = True
 show_augmentation = False
-show_rollout = True
+show_rollout = False
+
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = True
+Train = False
 
 #Trains the GNN model
 if Train:
@@ -48,17 +75,19 @@ if Train:
     # like nodes per edge and message passing layers.
     train_gnn.train_gnn(
         Floor, 
-        num_trajectories_train=Num_train_trajectories, 
-        num_trajectories_test=Num_test_trajectories,
+        train_range=train_range,
+        val_range=val_range,
         save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
-        save_test_dataset_path="data/pytorch_datasets/gns_test_dataset.pt",
+        save_val_dataset_path="data/pytorch_datasets/gns_val_dataset.pt",
         save_model_path="models/gns_model.pt", 
         rebuild_datasets=True,
-        epochs=400, 
-        batch_size=64, 
+        epochs=epochs, 
+        batch_size=batch_size, 
         lr=1e-4,
         nodes_per_edge=nodes_per_edge,
+        nearest_neighbors=K_nearest_neighbors,
         message_passing_layers=message_passing_layers,
+        repeat_blocks=repeat_blocks
     )
 
 
@@ -68,7 +97,8 @@ if Train:
 node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_features(
     Floor,
     throw_number=0,
-    nodes_per_edge=nodes_per_edge
+    nodes_per_edge=nodes_per_edge,
+    nearest_neighbors=K_nearest_neighbors,
 )
 node_dim = node_feat.shape[2]
 edge_dim = edge_feat.shape[2]
@@ -81,7 +111,7 @@ nodes_body = torch.tensor(
 
 #Loads the trained GNN model from the saved file, and sets it to evaluation mode. 
 #This model will be used for the rollouts and visualizations later in the code.
-model = GNSModel(node_dim, edge_dim, latent_dim=128, num_layers=message_passing_layers)
+model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K=repeat_blocks)
 model.load_state_dict(torch.load("models/gns_model.pt", map_location=device))
 model.to(device)
 model.eval()
@@ -94,6 +124,11 @@ e_mean = norm_stats["e_mean"]
 e_std = norm_stats["e_std"]
 accel_std = norm_stats["acc_std"]
 accel_mean = norm_stats["acc_mean"]
+
+
+if display_stats:
+    evaluate_metrics.evaluate_model(model, Floor, test_range, nodes_per_edge, K_nearest_neighbors, nodes_body, 
+                       accel_std, accel_mean, x_mean, x_std, e_mean, e_std)
 
 
 
@@ -113,6 +148,7 @@ if show_augmentation:
         throw_number=0,
         save_path="Gifs/Showing_Rotated_Cube.gif",
         nodes_per_edge=nodes_per_edge,
+        nearest_neighbors=K_nearest_neighbors,
     )
 
 
@@ -124,6 +160,7 @@ if show_rollout:
         Floor,
         throw_number=0,
         nodes_per_edge=nodes_per_edge,
+        nearest_neighbors=K_nearest_neighbors,
         rest_positions=nodes_body,
         accel_std=accel_std,
         accel_mean=accel_mean,

@@ -126,7 +126,7 @@ def add_random_walk_noise(positions, noise_scale=3e-4):
 #the node features, edge features, edge indices, and the true positions of the nodes for each timestep, which can be used for 
 #training the GNN model. The function also has an option to add random walk noise to the positions during training for data 
 #augmentation.
-def get_gns_features(Wall, throw_number, nodes_per_edge=5, nearest_neighbors=4, h=2, training=False):
+def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, h=2, training=False):
 
     #This is the data path for the raw trajectories from the paper. The function loads the data for the specified throw number, 
     #unscales the position and velocity data back to SI units,

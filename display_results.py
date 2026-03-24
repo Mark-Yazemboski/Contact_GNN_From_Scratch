@@ -45,7 +45,11 @@ def shape_match(pred_positions, rest_positions, masses=None, alpha=1.0):
     #Performs Singular Value Decomposition (SVD) on the Apq matrix to find the optimal rotation
     #that aligns the predicted positions with the rest positions.
     U, S, Vh = torch.linalg.svd(Apq)
-    R = U @ Vh
+
+
+    d = torch.linalg.det(U @ Vh)
+    D = torch.diag(torch.tensor([1.0, 1.0, d], device=U.device))
+    R = U @ D @ Vh
 
     #Applies the rotation to the predicted positions and translates them 
     #to align with the center of mass of the predicted positions.
@@ -67,6 +71,7 @@ def rollout_trajectory_feedback_shape_match(
     Wall,
     throw_number,
     nodes_per_edge=2,
+    nearest_neighbors=4,
     h=2,
     rest_positions=None,
     accel_std=None,
@@ -93,7 +98,11 @@ def rollout_trajectory_feedback_shape_match(
 
     #First generates the node features, edge features, edge indices, and true positions for the specified trajectory in the dataset.
     node_feat, edge_feat, edge_index, true_positions = get_gns_features(
-        Wall, throw_number, nodes_per_edge=nodes_per_edge, h=h
+        Wall,
+        throw_number,
+        nodes_per_edge=nodes_per_edge,
+        nearest_neighbors=nearest_neighbors,
+        h=h,
     )
 
     #Converts the edge indices and true positions to the appropriate device (CPU or GPU) for computation.
@@ -133,7 +142,7 @@ def rollout_trajectory_feedback_shape_match(
     ]
 
     #Performs the closed-loop rollout for the remaining frames in the trajectory, starting from frame 3.
-    for _ in range(2, true_positions.shape[0] - 1):
+    for _ in range(h, true_positions.shape[0] - 1):
 
         #Unpacks the last three predicted positions, which are used to build the input features
         #for the GNN model at the current step.
@@ -359,10 +368,9 @@ def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall
     #Computes the distance to the wall if the Wall information is provided, and concatenates it to the node features.
     #Also clips the distance to the wall to be between 0 and 0.5, which is a reasonable range for the distances in this dataset.
     if Wall is not None:
-        wall_n = torch.as_tensor(Wall.get_normal(), dtype=x_t.dtype, device=x_t.device)
+        wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
         wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
-        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True)
-        b = torch.clamp(b, 0.0, 0.5)
+        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
         x_node = torch.cat([v_t, v_tm1, b], dim=-1)
     else:
         x_node = torch.cat([v_t, v_tm1], dim=-1)
@@ -458,6 +466,7 @@ def animate_augmented_data(
     Wall,
     throw_number,
     nodes_per_edge=2,
+    nearest_neighbors=4,
     h=2,
     interval=50,
     save_path=None
@@ -468,6 +477,7 @@ def animate_augmented_data(
         Wall,
         throw_number,
         nodes_per_edge=nodes_per_edge,
+        nearest_neighbors=nearest_neighbors,
         h=h
     )
 
