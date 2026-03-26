@@ -423,6 +423,8 @@ def train_gnn(Wall,
     train_loss_values = []
     val_loss_epochs = []
     val_loss_values = []
+    best_val_loss = float("inf")
+    best_val_epoch = None
 
     #If resuming and history exists in checkpoint, continue appending.
     if resume_checkpoint_path is not None and isinstance(checkpoint, dict):
@@ -430,6 +432,8 @@ def train_gnn(Wall,
         train_loss_values = list(checkpoint.get("train_loss_values", train_loss_values))
         val_loss_epochs = list(checkpoint.get("val_loss_epochs", val_loss_epochs))
         val_loss_values = list(checkpoint.get("val_loss_values", val_loss_values))
+        best_val_loss = float(checkpoint.get("best_val_loss", best_val_loss))
+        best_val_epoch = checkpoint.get("best_val_epoch", best_val_epoch)
 
     print("Starting training...")
     print(f"  Train samples: {len(dataset_train)} | Val samples: {len(dataset_val)}")
@@ -492,6 +496,13 @@ def train_gnn(Wall,
             val_loss_epochs.append(epoch_num)
             val_loss_values.append(float(avg_val_loss))
 
+            if avg_val_loss < best_val_loss:
+                best_val_loss = float(avg_val_loss)
+                best_val_epoch = epoch_num
+                best_model_path = os.path.splitext(save_model_path)[0] + "_best_model.pt"
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Best model saved to {best_model_path} at epoch {best_val_epoch}")
+
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f} | "
                 f"Val Loss: {avg_val_loss:.9f}")
@@ -514,6 +525,8 @@ def train_gnn(Wall,
                     "train_loss_values": train_loss_values,
                     "val_loss_epochs": val_loss_epochs,
                     "val_loss_values": val_loss_values,
+                    "best_val_loss": best_val_loss,
+                    "best_val_epoch": best_val_epoch,
                 },
                 checkpoint_path,
             )
@@ -534,6 +547,8 @@ def train_gnn(Wall,
             "val_loss_epochs": val_loss_epochs,
             "val_loss_values": val_loss_values,
             "validation_check_interval": validation_check_interval,
+            "best_val_loss": best_val_loss,
+            "best_val_epoch": best_val_epoch,
         },
         loss_history_path,
     )

@@ -130,9 +130,9 @@ def evaluate_model(model, Wall, test_trajectory_indices, nodes_per_edge,
         all_floor_penetrations.append(metrics['floor_penetration'])
 
     print("\n--- Test Set Metrics ---")
-    print(f"Center Error (relative):   {np.mean(all_center_errors):.4f} ± {np.std(all_center_errors):.4f}")
+    print(f"Center Error ( / width):   {np.mean(all_center_errors):.4f} ± {np.std(all_center_errors):.4f}")
     print(f"Angle Error (degrees):     {np.mean(all_angle_errors):.4f} ± {np.std(all_angle_errors):.4f}")
-    print(f"Floor Penetration:         {np.mean(all_floor_penetrations):.4f} ± {np.std(all_floor_penetrations):.4f}")
+    print(f"Floor Penetration (/ width):         {np.mean(all_floor_penetrations):.4f} ± {np.std(all_floor_penetrations):.4f}")
 
     return {
         'center_error':      np.mean(all_center_errors),

@@ -44,11 +44,10 @@ nodes_per_edge = 2
 K_nearest_neighbors = 3
 
 #ADD COMMENT -------------------------------------------------------------------------------------
-message_passing_layers = 10
-repeat_blocks = 3
+message_passing_layers = 5
+repeat_blocks = 1
 
 batch_size=64
-
 steps = 1000000
 traj_timesteps = 100
 epochs = int(steps / (Num_train_trajectories * traj_timesteps / batch_size))
@@ -64,7 +63,7 @@ validation_check_interval = 20
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 display_loss_curves = True
-display_stats = False
+display_stats = True
 show_meshed_cube = True
 show_augmentation = False
 show_rollout = True
@@ -73,7 +72,7 @@ show_rollout = True
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
 
 #Model save/load settings.
 save_model_path = "models/gns_model.pt"
@@ -82,7 +81,7 @@ save_model_path = "models/gns_model.pt"
 rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
-resume_training_checkpoint_path = "models/gns_model_epoch100.pt"
+resume_training_checkpoint_path = None
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
@@ -142,9 +141,11 @@ nodes_body = torch.tensor(
 model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K=repeat_blocks)
 
 if inference_model_path is None:
-    load_model_path = os.path.splitext(save_model_path)[0] + "_final.pt"
+    load_model_path = os.path.splitext(save_model_path)[0] + "_best_model.pt"
 else:
     load_model_path = inference_model_path
+
+print(f"Loading model from {load_model_path} for evaluation")
 
 loaded_obj = torch.load(load_model_path, map_location=device, weights_only=False)
 if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
