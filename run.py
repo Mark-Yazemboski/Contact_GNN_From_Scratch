@@ -31,9 +31,9 @@ Num_validation_trajectories = int(validation_percentage * Num_total_trajectories
 Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
 
 # Override for experiments with smaller training sets
-Used_Num_train_trajectories = 4
+Used_Num_train_trajectories = 256
 
-train_range = range(0, Num_train_trajectories)
+train_range = range(0, Used_Num_train_trajectories)
 val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
 test_range  = range(Num_train_trajectories + Num_validation_trajectories, Num_total_trajectories)
 
@@ -56,11 +56,10 @@ repeat_blocks = 1
 batch_size=64
 steps = 1000000
 traj_timesteps = 100
-epochs = int(steps / (Num_train_trajectories * traj_timesteps / batch_size))
+epochs = int(steps / (Used_Num_train_trajectories * traj_timesteps / batch_size))
 
 print("Training for {} epochs".format(epochs))
 
-epochs = 200
 epoch_checkpoint_interval = 100
 validation_check_interval = 20
 
@@ -78,10 +77,10 @@ show_rollout = True
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
 
 #Model save/load settings.
-save_model_path = "models/gns_model.pt"
+save_model_path = "models/256_train/256_train_gns_model.pt"
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
 rebuild_datasets = True
