@@ -551,6 +551,21 @@ def train_gnn(Wall,
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f} | "
                 f"Val Loss: {avg_val_loss:.9f}")
+            
+            loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
+            torch.save(
+                {
+                    "train_loss_epochs": train_loss_epochs,
+                    "train_loss_values": train_loss_values,
+                    "val_loss_epochs": val_loss_epochs,
+                    "val_loss_values": val_loss_values,
+                    "validation_check_interval": validation_check_interval,
+                    "best_val_loss": best_val_loss,
+                    "best_val_epoch": best_val_epoch,
+                },
+                loss_history_path,
+            )
+            print(f"Loss history saved to {loss_history_path}")
         else:
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f}")
