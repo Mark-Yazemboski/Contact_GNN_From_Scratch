@@ -141,7 +141,7 @@ def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=
         R = quat_to_rotmat(state[3:7])
         all_positions.append((R @ nodes_body.T).T + state[:3])
 
-    return torch.stack(all_positions), edge_index
+    return torch.stack(all_positions), edge_index, nodes_body   
 
 #This function will take in a given trajectory from the dataset, and will compute the node and edge states for each timestep
 #of the trajectory. The node features include finite difference velocity features and distance to the wall, while the edge features

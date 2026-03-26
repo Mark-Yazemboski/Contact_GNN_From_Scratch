@@ -169,13 +169,13 @@ def build_dataset(Wall, traj_range,
     #Runs through each trajectory in the specified range
     for throw_number in traj_range:
         print(f"Processing trajectory {throw_number}")
-        positions, edge_index = get_clean_positions(
+        positions, edge_index, nodes_body  = get_clean_positions(
             Wall,
             throw_number,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
         )
-        dataset.append({"positions": positions, "edge_index": edge_index})
+        dataset.append({"positions": positions, "edge_index": edge_index, "nodes_body": nodes_body})
 
     return dataset
 
@@ -191,9 +191,8 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
     sender = edge_index[0]
     receiver = edge_index[1]
 
-    #Use first frame as rest shape proxy for undeformed edge offsets.
-    rest = positions[0]
-    dU = rest[sender] - rest[receiver]
+    nodes_body = traj["nodes_body"]           # body frame, same for all trajectories
+    dU = nodes_body[sender] - nodes_body[receiver]   # replaces the positions[0] lines
     dU_norm = torch.norm(dU, dim=1, keepdim=True)
 
     T = positions.shape[0]
