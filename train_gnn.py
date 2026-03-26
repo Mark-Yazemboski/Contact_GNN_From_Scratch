@@ -24,8 +24,7 @@ class GNSLayer(nn.Module):
         self.edge_mlp = nn.Sequential(
             nn.Linear(node_dim * 2 + edge_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
+            nn.Linear(hidden_dim, hidden_dim)
         )
 
         # Node update MLP. Takes the concatenated node features and aggregated messages as input, and outputs the 
@@ -84,10 +83,10 @@ class GNSLayer(nn.Module):
 
         #Processes the node input through the node MLP to get the node updates.
         node_update = self.node_mlp(node_input)
+        node_update = self.node_norm(node_update)
 
-        #Updates the node features by adding the node updates to the original node features, and applies layer normalization to the updated node features.
+        #Updates the node features by adding the normalized node update to the original node features.
         x = x + node_update
-        x = self.node_norm(x)
 
         return x, edge_attr
 
