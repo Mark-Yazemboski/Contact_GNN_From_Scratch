@@ -6,7 +6,7 @@ import random
 import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from generate_node_states import get_gns_features
+from generate_node_states import get_clean_positions, add_random_walk_noise
 
 
 
@@ -169,40 +169,56 @@ def build_dataset(Wall, traj_range,
     #Runs through each trajectory in the specified range
     for throw_number in traj_range:
         print(f"Processing trajectory {throw_number}")
-
-        #Gets the graph features for the current trajectory
-        node_feat, edge_feat, edge_index, all_positions = get_gns_features(
+        positions, edge_index = get_clean_positions(
             Wall,
             throw_number,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
-            h=h,
-            training=True
         )
-
-        #Dimensions of the data
-        T = node_feat.shape[0]
-        assert all_positions.shape[0] == T, "node_feat and all_positions must be time-aligned"
-
-        # For each time t, predict a_t from features at t:
-        # a_t = x_{t+1} - 2 x_t + x_{t-1}
-        for t in range(1, T - 1):
-            y_t = all_positions[t + 1] - 2.0 * all_positions[t] + all_positions[t - 1]
-
-            #Saves the node features, edge features, edge indices, and target accelerations for time t into a Data object, 
-            #which is then added to the dataset list.
-            data = Data(
-                x=node_feat[t],
-                edge_index=edge_index,
-                edge_attr=edge_feat[t],
-                y=y_t,
-                pos_prev=all_positions[t - 1],
-                pos_curr=all_positions[t],
-                pos_next=all_positions[t + 1],
-            )
-            dataset.append(data)
+        dataset.append({"positions": positions, "edge_index": edge_index})
 
     return dataset
+
+
+def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
+    """
+    Given a raw trajectory dict, apply random-walk noise and return
+    a list of per-timestep Data objects (un-normalised).
+    """
+
+    positions = add_random_walk_noise(traj["positions"], noise_scale=noise_scale)
+    edge_index = traj["edge_index"]
+    sender = edge_index[0]
+    receiver = edge_index[1]
+
+    #Use first frame as rest shape proxy for undeformed edge offsets.
+    rest = positions[0]
+    dU = rest[sender] - rest[receiver]
+    dU_norm = torch.norm(dU, dim=1, keepdim=True)
+
+    T = positions.shape[0]
+    samples = []
+
+    for t in range(h, T - 1):
+        v_fd = []
+        for k in range(h):
+            v_fd.append(positions[t - k] - positions[t - k - 1])
+        v_fd = torch.cat(v_fd, dim=1)
+
+        wall_n = torch.tensor(Wall.normal, dtype=torch.float32)
+        wall_c = torch.tensor(Wall.center_position, dtype=torch.float32)
+        dist = torch.sum((positions[t] - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+        x_node = torch.cat([v_fd, dist], dim=1)
+
+        d = positions[t][sender] - positions[t][receiver]
+        d_norm = torch.norm(d, dim=1, keepdim=True)
+        e_attr = torch.cat([d, d_norm, dU, dU_norm], dim=1)
+
+        y = positions[t + 1] - 2.0 * positions[t] + positions[t - 1]
+
+        samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=y))
+
+    return samples
 
 #This function generates a random rotation matrix for rotating the data around the z-axis.
 def random_z_rotation():
@@ -287,6 +303,7 @@ def train_gnn(Wall,
               lr=1e-4,
               nodes_per_edge=5,
               nearest_neighbors=3,
+              h=2,
               message_passing_layers=5,
               repeat_blocks=1,
               resume_checkpoint_path=None,
@@ -308,6 +325,7 @@ def train_gnn(Wall,
             train_range,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
+            h=h,
         )
         torch.save(dataset_train, save_train_dataset_path)
         print(f"Training dataset saved to {save_train_dataset_path}")
@@ -318,6 +336,7 @@ def train_gnn(Wall,
             val_range,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
+            h=h,
         )
         torch.save(dataset_val, save_val_dataset_path)
         print(f"Validation dataset saved to {save_val_dataset_path}")
@@ -331,18 +350,30 @@ def train_gnn(Wall,
         dataset_val = torch.load(save_val_dataset_path, weights_only=False)
         print(f"Validation dataset loaded from {save_val_dataset_path}")
 
-    #Computes the mean and standard deviation for the node features, edge features, and target accelerations 
-    #across the training dataset.
-    x_mean, x_std = _compute_node_stats(dataset_train)
-    e_mean, e_std = _compute_edge_stats(dataset_train)
-    acc_mean, acc_std = _compute_accel_stats(dataset_train)
+    #Ensure dataset is in trajectory format expected by online-noise training.
+    if len(dataset_train) > 0:
+        first = dataset_train[0]
+        if not (isinstance(first, dict) and "positions" in first and "edge_index" in first):
+            raise ValueError(
+                "Loaded training dataset is in legacy format. Set rebuild_datasets=True to rebuild trajectory datasets."
+            )
 
-    #Applies normalization to the node features, edge features, and target accelerations in both the training and 
-    #test datasets using the computed statistics.
-    _apply_input_normalization(dataset_train, x_mean, x_std, e_mean, e_std)
-    _apply_input_normalization(dataset_val, x_mean, x_std, e_mean, e_std)
-    _apply_accel_normalization(dataset_train, acc_mean, acc_std)
-    _apply_accel_normalization(dataset_val, acc_mean, acc_std)
+    if len(dataset_val) > 0:
+        first = dataset_val[0]
+        if not (isinstance(first, dict) and "positions" in first and "edge_index" in first):
+            raise ValueError(
+                "Loaded validation dataset is in legacy format. Set rebuild_datasets=True to rebuild trajectory datasets."
+            )
+
+    #Compute normalization stats from one clean pass (no noise) over training trajectories.
+    clean_samples = []
+    for traj in dataset_train:
+        clean_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=0.0))
+
+    x_mean, x_std = _compute_node_stats(clean_samples)
+    e_mean, e_std = _compute_edge_stats(clean_samples)
+    acc_mean, acc_std = _compute_accel_stats(clean_samples)
+    del clean_samples
 
     #saves the normalization statistics to a file, which can be used later for normalizing new data during inference.
     norm_stats_path = os.path.splitext(save_model_path)[0] + "_norms.pt"
@@ -350,13 +381,18 @@ def train_gnn(Wall,
 
     print(f"Saved normalization stats to {norm_stats_path}")
 
-    #Creates a DataLoader for the training dataset, which will handle batching and shuffling of the data during training.
-    loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(dataset_val,   batch_size=batch_size, shuffle=False)
+    #Build a clean validation sample set once (no training noise).
+    val_samples = []
+    for traj in dataset_val:
+        val_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=0.0))
+    _apply_input_normalization(val_samples, x_mean, x_std, e_mean, e_std)
+    _apply_accel_normalization(val_samples, acc_mean, acc_std)
+    val_loader = DataLoader(val_samples, batch_size=batch_size, shuffle=False)
 
-    #Gets input dimensions from the first data point
-    node_dim = dataset_train[0].x.shape[1]
-    edge_dim = dataset_train[0].edge_attr.shape[1]
+    #Get input dimensions from one clean sample.
+    sample_for_dims = _build_timestep_samples(dataset_train[0], Wall, h=h, noise_scale=0.0)[0]
+    node_dim = sample_for_dims.x.shape[1]
+    edge_dim = sample_for_dims.edge_attr.shape[1]
 
     #Initializes the GNS model, which consists of an encoder for the node features, an encoder for the edge features, 
     #multiple GNS layers for message passing,
@@ -444,6 +480,16 @@ def train_gnn(Wall,
         #Resets total loss for the epoch
         model.train()
         total_loss = 0.0
+
+        #Resample noise each epoch and rebuild training samples/loader.
+        noisy_samples = []
+        for traj in dataset_train:
+            noisy_samples.extend(_build_timestep_samples(traj, Wall, h=h))
+
+        _apply_input_normalization(noisy_samples, x_mean, x_std, e_mean, e_std)
+        _apply_accel_normalization(noisy_samples, acc_mean, acc_std)
+
+        loader = DataLoader(noisy_samples, batch_size=batch_size, shuffle=True)
 
         #Iterates through batches of data
         for batch in loader:

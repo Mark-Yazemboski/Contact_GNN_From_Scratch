@@ -120,6 +120,29 @@ def add_random_walk_noise(positions, noise_scale=3e-4):
 
     return noisy
 
+
+def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4):
+    """Returns full clean (T, N, 3) positions and edge_index. No noise, no features."""
+    data_path = f"data/tosses_processed/{throw_number}.pt"
+    data = torch.load(data_path)
+    unscaled_states = unscale_position_velocity(data[0].float())
+    T = unscaled_states.shape[0]
+
+    nodes_body = torch.tensor(
+        mesh_cube_surface(BLOCK_HALF_WIDTH * 2, nodes_per_edge), dtype=torch.float32
+    )
+    edge_index = torch.tensor(
+        knn_adjacency(nodes_body.numpy(), k=nearest_neighbors), dtype=torch.long
+    )
+
+    all_positions = []
+    for t in range(T):
+        state = unscaled_states[t]
+        R = quat_to_rotmat(state[3:7])
+        all_positions.append((R @ nodes_body.T).T + state[:3])
+
+    return torch.stack(all_positions), edge_index
+
 #This function will take in a given trajectory from the dataset, and will compute the node and edge states for each timestep
 #of the trajectory. The node features include finite difference velocity features and distance to the wall, while the edge features
 #include the relative position between connected nodes, the undeformed edge displacement, and their norms. The function returns

@@ -31,7 +31,7 @@ Num_validation_trajectories = int(validation_percentage * Num_total_trajectories
 Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
 
 # Override for experiments with smaller training sets
-Used_Num_train_trajectories = 256
+Used_Num_train_trajectories = 4
 
 train_range = range(0, Used_Num_train_trajectories)
 val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
@@ -77,10 +77,10 @@ show_rollout = True
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = True
+Train = False
 
 #Model save/load settings.
-save_model_path = "models/256_train/256_train_gns_model.pt"
+save_model_path = f"models/{Used_Num_train_trajectories}_train/{Used_Num_train_trajectories}_train_gns_model.pt"
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
 rebuild_datasets = True
@@ -90,7 +90,7 @@ resume_training_checkpoint_path = None
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
-inference_model_path = None
+inference_model_path = f"models/{Used_Num_train_trajectories}_train/{Used_Num_train_trajectories}_train_gns_model_best_model.pt"
 
 #Trains the GNN model
 if Train:
@@ -106,8 +106,8 @@ if Train:
         Floor, 
         train_range=train_range,
         val_range=val_range,
-        save_train_dataset_path="data/pytorch_datasets/gns_train_dataset.pt", 
-        save_val_dataset_path="data/pytorch_datasets/gns_val_dataset.pt",
+        save_train_dataset_path=f"data/pytorch_datasets/gns_train_dataset.pt",
+        save_val_dataset_path=f"data/pytorch_datasets/gns_val_dataset.pt",
         save_model_path=save_model_path,
         rebuild_datasets=rebuild_datasets,
         epochs=epochs, 
