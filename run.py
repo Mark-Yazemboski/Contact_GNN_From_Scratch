@@ -68,7 +68,7 @@ validation_check_interval = 20
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 display_loss_curves = True
-display_stats = True
+display_stats = False
 show_meshed_cube = True
 show_augmentation = False
 show_rollout = True
