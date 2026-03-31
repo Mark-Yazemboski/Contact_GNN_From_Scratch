@@ -56,12 +56,18 @@ repeat_blocks = 1
 batch_size=64
 steps = 1000000
 traj_timesteps = 100
-epochs = int(steps / (Used_Num_train_trajectories * traj_timesteps / batch_size))
+
+#The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
+# we use gradient accumulation over 8 steps.
+accumulation_steps = 8
+
+
+epochs = int(steps / (Used_Num_train_trajectories * traj_timesteps / (batch_size * accumulation_steps)))
 
 print("Training for {} epochs".format(epochs))
 
-epoch_checkpoint_interval = 100
-validation_check_interval = 20
+epoch_checkpoint_interval = 2000
+validation_check_interval = 25
 
 #Sets which visuals you want to turn on.
 #Meshed cube shows the initial node positions and edges. 
@@ -69,7 +75,7 @@ validation_check_interval = 20
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 display_loss_curves = True
 display_stats = True
-show_meshed_cube = True
+show_meshed_cube = False
 show_augmentation = False
 show_rollout = True
 
@@ -112,6 +118,7 @@ if Train:
         rebuild_datasets=rebuild_datasets,
         epochs=epochs, 
         batch_size=batch_size, 
+        accumulation_steps=accumulation_steps,
         lr=1e-4,
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,

@@ -299,6 +299,7 @@ def train_gnn(Wall,
               rebuild_datasets=False,
               epochs=50,
               batch_size=64,
+              accumulation_steps=8,
               lr=1e-4,
               nodes_per_edge=5,
               nearest_neighbors=3,
@@ -490,8 +491,12 @@ def train_gnn(Wall,
 
         loader = DataLoader(noisy_samples, batch_size=batch_size, shuffle=True)
 
-        #Iterates through batches of data
-        for batch in loader:
+        #Zeroes gradients at the start of the epoch before accumulation begins.
+        optimizer.zero_grad()
+
+        effective_accumulation = min(accumulation_steps, len(loader))
+
+        for i, batch in enumerate(loader):
 
             #Moves the batch to the GPU
             batch = batch.to(device)
@@ -499,23 +504,28 @@ def train_gnn(Wall,
             #Applies a random rotation to the node features, edge features, and target accelerations in the batch 
             #for data augmentation.
             batch = rotate_batch(batch)
-            
-            #Zeroes the gradients
-            optimizer.zero_grad()
 
             #Forward pass
             pred_accel = model(batch)
 
             #Computes the loss between the predicted accelerations and the target accelerations in the batch 
-            #using mean squared error loss.
+            #using mean squared error loss. The loss is scaled down by accumulation_steps so that the 
+            #accumulated gradient over accumulation_steps batches is equivalent to one gradient update 
+            #on a batch that is accumulation_steps times larger.
             loss = loss_fn(pred_accel, batch.y)
+            scaled_loss = loss / effective_accumulation
+            scaled_loss.backward()
 
-            #Backpropagation and optimization step
-            loss.backward()
-            optimizer.step()
-
-            #Accumulates loss
+            #Accumulates the unscaled loss for logging purposes so the reported loss 
+            #values are on the same scale regardless of accumulation_steps.
             total_loss += loss.item()
+
+            #Every accumulation_steps batches, apply the accumulated gradient as one optimizer step,
+            #then zero the gradients for the next accumulation window. Also handles the final batch 
+            #of the epoch if the total number of batches is not divisible by accumulation_steps.
+            if (i + 1) % effective_accumulation == 0 or (i + 1) == len(loader):
+                optimizer.step()
+                optimizer.zero_grad()
 
         #Averages loss over the epoch
         avg_train_loss = total_loss / len(loader)
