@@ -41,7 +41,7 @@ Num_validation_trajectories = int(validation_percentage * Num_total_trajectories
 Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
 
 # Override for experiments with smaller training sets
-Used_Num_train_trajectories = 4
+Used_Num_train_trajectories = 256
 
 train_range = range(0, Used_Num_train_trajectories)
 val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
@@ -90,14 +90,18 @@ show_meshed_cube = False
 show_augmentation = False
 show_rollout = True
 
-
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#---------------------------------------------------------------------------------------------------------
+extra_name = "" #CHANGE THIS---------------------------------------------------------------------------------------------------------
+#---------------------------------------------------------------------------------------------------------
+#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
 Train = False
 
 #Model save/load settings.
-save_model_path = f"models/{Used_Num_train_trajectories}_train/{Used_Num_train_trajectories}_train_gns_model.pt"
+save_model_path = f"models/{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt"
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
 rebuild_datasets = True
@@ -107,7 +111,7 @@ resume_training_checkpoint_path = None
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
-inference_model_path = f"models/{Used_Num_train_trajectories}_train/{Used_Num_train_trajectories}_train_gns_model_best_model.pt"
+inference_model_path = f"models/{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_final.pt"
 
 #Trains the GNN model
 if Train:
