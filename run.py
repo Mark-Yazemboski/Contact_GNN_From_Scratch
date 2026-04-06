@@ -10,6 +10,16 @@ import evaluate_metrics
 import random
 import os
 
+def compute_epochs(num_trajectories, target_steps, batch_size, accumulation_steps, traj_timesteps=100, history=2):
+    usable_per_traj = traj_timesteps - history - 1
+    total_samples = num_trajectories * usable_per_traj
+    num_batches = (total_samples + batch_size - 1) // batch_size  # ceil division
+    effective_accum = min(accumulation_steps, num_batches)
+    steps_per_epoch = num_batches // effective_accum
+    steps_per_epoch = max(steps_per_epoch, 1)
+    epochs = (target_steps + steps_per_epoch - 1) // steps_per_epoch
+    return epochs
+
 #This is the real blocks width from the paper. This is used to unnormalize the data that they provide in the trajectories,
 #And also create the node positions relitive to the COM data that they provide.
 BLOCK_HALF_WIDTH = 0.0524
@@ -50,19 +60,20 @@ nodes_per_edge = 2
 K_nearest_neighbors = 3
 
 #ADD COMMENT -------------------------------------------------------------------------------------
-message_passing_layers = 5
-repeat_blocks = 1
+message_passing_layers = 10
+repeat_blocks = 3
 
 batch_size=64
 steps = 1000000
 traj_timesteps = 100
+pos_history = 2
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
 accumulation_steps = 8
 
 
-epochs = int(steps / (Used_Num_train_trajectories * traj_timesteps / (batch_size * accumulation_steps)))
+epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
 
 print("Training for {} epochs".format(epochs))
 
@@ -122,6 +133,7 @@ if Train:
         lr=1e-4,
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
+        h = pos_history,
         message_passing_layers=message_passing_layers,
         repeat_blocks=repeat_blocks,
         resume_checkpoint_path=resume_training_checkpoint_path,

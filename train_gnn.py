@@ -186,34 +186,35 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
     a list of per-timestep Data objects (un-normalised).
     """
 
-    positions = add_random_walk_noise(traj["positions"], noise_scale=noise_scale)
+    clean_positions = traj["positions"]
+    noisy_positions = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
     edge_index = traj["edge_index"]
     sender = edge_index[0]
     receiver = edge_index[1]
 
-    nodes_body = traj["nodes_body"]           # body frame, same for all trajectories
-    dU = nodes_body[sender] - nodes_body[receiver]   # replaces the positions[0] lines
+    nodes_body = traj["nodes_body"]
+    dU = nodes_body[sender] - nodes_body[receiver]
     dU_norm = torch.norm(dU, dim=1, keepdim=True)
 
-    T = positions.shape[0]
+    T = clean_positions.shape[0]
     samples = []
 
     for t in range(h, T - 1):
         v_fd = []
         for k in range(h):
-            v_fd.append(positions[t - k] - positions[t - k - 1])
+            v_fd.append(noisy_positions[t - k] - noisy_positions[t - k - 1])
         v_fd = torch.cat(v_fd, dim=1)
 
         wall_n = torch.tensor(Wall.normal, dtype=torch.float32)
         wall_c = torch.tensor(Wall.center_position, dtype=torch.float32)
-        dist = torch.sum((positions[t] - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+        dist = torch.sum((noisy_positions[t] - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
         x_node = torch.cat([v_fd, dist], dim=1)
 
-        d = positions[t][sender] - positions[t][receiver]
+        d = noisy_positions[t][sender] - noisy_positions[t][receiver]
         d_norm = torch.norm(d, dim=1, keepdim=True)
         e_attr = torch.cat([d, d_norm, dU, dU_norm], dim=1)
 
-        y = positions[t + 1] - 2.0 * positions[t] + positions[t - 1]
+        y = clean_positions[t + 1] - 2.0 * clean_positions[t] + clean_positions[t - 1]
 
         samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=y))
 
