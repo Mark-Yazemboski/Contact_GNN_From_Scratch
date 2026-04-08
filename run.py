@@ -41,7 +41,8 @@ Num_validation_trajectories = int(validation_percentage * Num_total_trajectories
 Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
 
 # Override for experiments with smaller training sets
-Used_Num_train_trajectories = 256
+Used_Num_train_trajectories = 4
+trajectory_folder = "data/tosses_processed"  # Folder where the trajectory .pt files are stored
 
 train_range = range(0, Used_Num_train_trajectories)
 val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
@@ -71,6 +72,12 @@ pos_history = 2
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
 accumulation_steps = 8
+
+#Data loading options
+#Set to False for older PyTorch or datasets with object serialization
+weights_only_load = True
+#Set to False if your dataset is already unscaled, or True to apply unscale_position_velocity 
+unscale_trajectory_data = True
 
 
 epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
@@ -111,7 +118,7 @@ resume_training_checkpoint_path = None
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
-inference_model_path = f"models/{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_final.pt"
+inference_model_path = f"models/{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt"
 
 #Trains the GNN model
 if Train:
@@ -135,6 +142,9 @@ if Train:
         batch_size=batch_size, 
         accumulation_steps=accumulation_steps,
         lr=1e-4,
+        trajectory_folder=trajectory_folder,
+        weights_only=weights_only_load,
+        unscale_data=unscale_trajectory_data,
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
         h = pos_history,

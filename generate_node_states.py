@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 
@@ -121,11 +122,15 @@ def add_random_walk_noise(positions, noise_scale=3e-4):
     return noisy
 
 
-def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4):
+def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, data_folder="data/tosses_processed", weights_only=True, unscale_data=True):
     """Returns full clean (T, N, 3) positions and edge_index. No noise, no features."""
-    data_path = f"data/tosses_processed/{throw_number}.pt"
-    data = torch.load(data_path)
-    unscaled_states = unscale_position_velocity(data[0].float())
+    data_path = os.path.join(data_folder, f"{throw_number}.pt")
+    data = torch.load(data_path, weights_only=weights_only)
+    states = data[0].float()
+    if unscale_data:
+        unscaled_states = unscale_position_velocity(states)
+    else:
+        unscaled_states = states
     T = unscaled_states.shape[0]
 
     nodes_body = torch.tensor(
@@ -149,13 +154,17 @@ def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=
 #the node features, edge features, edge indices, and the true positions of the nodes for each timestep, which can be used for 
 #training the GNN model. The function also has an option to add random walk noise to the positions during training for data 
 #augmentation.
-def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, h=2, training=False):
+def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, h=2, training=False, data_folder="data/tosses_processed", weights_only=True, unscale_data=True):
 
     #This is the data path for the raw trajectories from the paper. The function loads the data for the specified throw number, 
     #unscales the position and velocity data back to SI units,
-    data_path = f"data/tosses_processed/{throw_number}.pt"
-    data = torch.load(data_path)
-    unscaled_states = unscale_position_velocity(data[0].float())
+    data_path = os.path.join(data_folder, f"{throw_number}.pt")
+    data = torch.load(data_path, weights_only=weights_only)
+    states = data[0].float()
+    if unscale_data:
+        unscaled_states = unscale_position_velocity(states)
+    else:
+        unscaled_states = states
 
     #Gets the number of timesteps in the trajectory
     T = unscaled_states.shape[0]

@@ -162,7 +162,10 @@ class GNSModel(nn.Module):
 def build_dataset(Wall, traj_range,
                   nodes_per_edge=5,
                   nearest_neighbors=3,
-                  h=2):
+                  h=2,
+                  trajectory_folder="data/tosses_processed",
+                  weights_only=True,
+                  unscale_data=True):
 
     dataset = []
 
@@ -174,6 +177,9 @@ def build_dataset(Wall, traj_range,
             throw_number,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
+            data_folder=trajectory_folder,
+            weights_only=weights_only,
+            unscale_data=unscale_data,
         )
         dataset.append({"positions": positions, "edge_index": edge_index, "nodes_body": nodes_body})
 
@@ -307,6 +313,9 @@ def train_gnn(Wall,
               h=2,
               message_passing_layers=5,
               repeat_blocks=1,
+              trajectory_folder="data/tosses_processed",
+              weights_only=True,
+              unscale_data=True,
               resume_checkpoint_path=None,
               epoch_checkpoint_interval=500,
               validation_check_interval=20):
@@ -327,6 +336,9 @@ def train_gnn(Wall,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
             h=h,
+            trajectory_folder=trajectory_folder,
+            weights_only=weights_only,
+            unscale_data=unscale_data,
         )
         torch.save(dataset_train, save_train_dataset_path)
         print(f"Training dataset saved to {save_train_dataset_path}")
@@ -338,6 +350,9 @@ def train_gnn(Wall,
             nodes_per_edge=nodes_per_edge,
             nearest_neighbors=nearest_neighbors,
             h=h,
+            trajectory_folder=trajectory_folder,
+            weights_only=weights_only,
+            unscale_data=unscale_data,
         )
         torch.save(dataset_val, save_val_dataset_path)
         print(f"Validation dataset saved to {save_val_dataset_path}")

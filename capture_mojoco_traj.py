@@ -100,10 +100,10 @@ def generate_random_params():
 
 
 if __name__ == "__main__":
-    save_dir = "data/wind_trajectories"
+    save_dir = "data/mojoco_trajectories"
     os.makedirs(save_dir, exist_ok=True)
 
-    n_trajectories = 10
+    n_trajectories = 512
     n_steps = 200
     visualize_first = False
 
@@ -127,12 +127,13 @@ if __name__ == "__main__":
             visualize=True if i == 0 and visualize_first else False
         )
 
-        save_data = {
-            'trajectory': torch.tensor(traj, dtype=torch.float32),
-            'wind': torch.tensor(params['wind'], dtype=torch.float32),
-            'mass': params['mass'],
-            'params': params,
-        }
+        traj_tensor = torch.tensor(traj, dtype=torch.float32)
+        save_data = [
+            traj_tensor,                                              # [0] trajectory - what generate_node_states expects
+            torch.tensor(params['wind'], dtype=torch.float32),        # [1] wind
+            params['mass'],                                           # [2] mass
+            params,                                                   # [3] params
+        ]
 
         save_path = os.path.join(save_dir, f"{i}.pt")
         torch.save(save_data, save_path)
