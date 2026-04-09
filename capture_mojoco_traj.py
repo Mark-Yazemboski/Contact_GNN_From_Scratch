@@ -58,39 +58,28 @@ def collect_trajectory(wind_vector, initial_pos, initial_quat, initial_vel,
     return trajectory
 
 
-def generate_random_params():
-    # Wind: random direction, magnitude 0-10 m/s
+def generate_random_params(mass, wind_range, horizontal_pos_range, vertical_pos_range, horizontal_speed_range, vertical_speed_range, angvel_range):
+     
     wind_dir = np.random.randn(3)
-    wind_dir[2] = 0  # keep wind horizontal
+    wind_dir[2] = 0
     wind_dir = wind_dir / (np.linalg.norm(wind_dir) + 1e-8)
-    wind_mag = np.random.uniform(0, 10)
-    wind = wind_dir * wind_mag
+    wind_vec = wind_dir * np.random.uniform(wind_range[0], wind_range[1])
 
-    # Initial position: above the floor, random x/y within small range
     pos = np.array([
-        np.random.uniform(-0.2, 0.2),
-        np.random.uniform(-0.2, 0.2),
-        np.random.uniform(0.3, 0.8),
+        np.random.uniform(horizontal_pos_range[0], horizontal_pos_range[1]),
+        np.random.uniform(horizontal_pos_range[0], horizontal_pos_range[1]),
+        np.random.uniform(vertical_pos_range[0], vertical_pos_range[1]),
     ])
-
-    # Random initial rotation
     quat = random_quat()
-
-    # Random initial velocity (gentle toss)
     vel = np.array([
-        np.random.uniform(-0.5, 0.5),
-        np.random.uniform(-0.5, 0.5),
-        np.random.uniform(-0.3, 0.5),
+        np.random.uniform(horizontal_speed_range[0], horizontal_speed_range[1]),
+        np.random.uniform(horizontal_speed_range[0], horizontal_speed_range[1]),
+        np.random.uniform(vertical_speed_range[0], vertical_speed_range[1]),
     ])
-
-    # Random initial angular velocity (rad/s)
-    angvel = np.random.uniform(-3, 3, size=3)
-
-    # Mass close to the real cube (0.37 kg) with some variation
-    mass = np.random.uniform(0.2, 0.6)
+    angvel = np.random.uniform(angvel_range[0], angvel_range[1], size=3)
 
     return {
-        'wind': wind,
+        'wind': wind_vec,
         'pos': pos,
         'quat': quat,
         'vel': vel,
@@ -108,7 +97,7 @@ if __name__ == "__main__":
     visualize_first = False
 
     for i in range(n_trajectories):
-        params = generate_random_params()
+        params = generate_random_params(mass = 0.37, wind_range=(0, 5), horizontal_pos_range=(-0.2, 0.2), vertical_pos_range=(0.3, 0.8), horizontal_speed_range=(-1.25, 1.25), vertical_speed_range=(-0.3, 0.3), angvel_range=(-3, 3))
         print(f"Trajectory {i}: wind={params['wind'].round(2)}, "
               f"mass={params['mass']:.2f}, "
               f"pos={params['pos'].round(2)}, "
