@@ -1,8 +1,0 @@
-/models/*
-!/models/.gitkeep
-
-/data/pytorch_datasets/*
-!/data/pytorch_datasets/.gitkeep
-
-__pycache__/
-*.py[cod]
