@@ -185,15 +185,16 @@ def build_dataset(Wall, traj_range,
 
     return dataset
 
-
+#This function takes a raw trajectory dictionary, applies random-walk noise to the node positions, 
+#and returns a list of Data objects which include the node features, edge features, and target accelerations for each timestep.
 def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
-    """
-    Given a raw trajectory dict, apply random-walk noise and return
-    a list of per-timestep Data objects (un-normalised).
-    """
 
+    #Extracts the clean positions of the nodes from the trajectory, applies random-walk noise to create noisy positions,
     clean_positions = traj["positions"]
+
+    #Adds random walk noise to the clean positions to create noisy positions,
     noisy_positions = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
+
     edge_index = traj["edge_index"]
     sender = edge_index[0]
     receiver = edge_index[1]
@@ -205,24 +206,33 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
     T = clean_positions.shape[0]
     samples = []
 
+    #Runs through each timestep in the trajectory
     for t in range(h, T - 1):
         v_fd = []
+
+        #Makes the position history for the current timestep by taking the difference between the noisy positions 
+        #at the current timestep and the previous h timesteps.
         for k in range(h):
             v_fd.append(noisy_positions[t - k] - noisy_positions[t - k - 1])
         v_fd = torch.cat(v_fd, dim=1)
 
+        #Finds the distance from each node to the wall by projecting the vector from the wall center to the node position onto 
+        #the wall normal vector.
         wall_n = torch.tensor(Wall.normal, dtype=torch.float32)
         wall_c = torch.tensor(Wall.center_position, dtype=torch.float32)
         dist = torch.sum((noisy_positions[t] - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
         x_node = torch.cat([v_fd, dist], dim=1)
 
+        #Find the edge features for the current timestep by taking the difference between the noisy positions of the sender 
+        #and receiver nodes.
         d = noisy_positions[t][sender] - noisy_positions[t][receiver]
         d_norm = torch.norm(d, dim=1, keepdim=True)
         e_attr = torch.cat([d, d_norm, dU, dU_norm], dim=1)
 
-        y = clean_positions[t + 1] - 2.0 * clean_positions[t] + clean_positions[t - 1]
+        #Computes the target accelerations for the current timestep using finite difference on the CLEAN positions.
+        accel = clean_positions[t + 1] - 2.0 * clean_positions[t] + clean_positions[t - 1]
 
-        samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=y))
+        samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=accel))
 
     return samples
 

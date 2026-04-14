@@ -6,6 +6,8 @@ import torch_geometric
 from generate_node_states import get_gns_features, knn_adjacency
 from train_gnn import GNSModel 
 
+#This file contains functions for visualizing the results of the GNN model's predictions 
+
 #Set device for PyTorch (GPU if available, otherwise CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -84,17 +86,6 @@ def rollout_trajectory_feedback_shape_match(
     shape_alpha=1.0,
     return_edge_info=False
 ):
-    """
-    Closed-loop rollout:
-      1) predict a_t from current predicted state
-      2) integrate x_{t+1} = a_t + 2 x_t - x_{t-1}
-      3) shape-match x_{t+1}
-      4) feed updated positions into next step feature construction
-
-        If return_edge_info=True, also returns a dict with:
-            - edge_index: (2, E)
-            - edge_feat:  (T-h, E, F)
-    """
 
     #First generates the node features, edge features, edge indices, and true positions for the specified trajectory in the dataset.
     node_feat, edge_feat, edge_index, true_positions = get_gns_features(
@@ -664,3 +655,51 @@ def animate_augmented_data(
         print("Saved successfully.")
     
     plt.show()
+
+#This function plots the training and validation loss curves over epochs
+def plot_loss_curves(
+    train_loss_epochs,
+    train_loss_values,
+    val_loss_epochs=None,
+    val_loss_values=None,
+    title="Training and Validation Loss",
+    save_path=None,
+    show_plot=True,
+):
+    if len(train_loss_epochs) != len(train_loss_values):
+        raise ValueError("train_loss_epochs and train_loss_values must have same length")
+
+    if val_loss_epochs is not None and val_loss_values is not None:
+        if len(val_loss_epochs) != len(val_loss_values):
+            raise ValueError("val_loss_epochs and val_loss_values must have same length")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ax.plot(train_loss_epochs, train_loss_values, label="Train Loss", linewidth=2.0)
+
+    if val_loss_epochs is not None and val_loss_values is not None and len(val_loss_epochs) > 0:
+        ax.plot(
+            val_loss_epochs,
+            val_loss_values,
+            label="Validation Loss",
+            linewidth=2.0,
+            marker="o",
+            markersize=4,
+        )
+
+    ax.set_title(title)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+        print(f"Saved loss curve to {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig, ax

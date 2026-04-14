@@ -1,5 +1,4 @@
 from random import random
-
 import torch
 import wall
 import train_gnn
@@ -9,7 +8,12 @@ import display_results
 import evaluate_metrics
 import random
 import os
+#This file is the same as run.py, except it has perameters specific to handel the wind data in the mojoco trajectories
 
+
+#This function will take in the number of trajectories we are training on, and the 
+#number of optimizer steps we want to hit, and some other perameters, and calculate
+#how many epochs we need to train for.
 def compute_epochs(num_trajectories, target_steps, batch_size, accumulation_steps, traj_timesteps=100, history=2):
     usable_per_traj = traj_timesteps - history - 1
     total_samples = num_trajectories * usable_per_traj
@@ -30,20 +34,31 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #Makes the floor object
 Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
 
-
+#This is the total number of trajectories in the dataset. 
+#The paper used 570 trajectories, so we use that as the default.
 Num_total_trajectories = 570
+
+#This sets the percentage of trajectories to use for training, validation, and testing.
 training_percentage = 0.5
 validation_percentage = 0.3
 testing_percentage = 0.2
 
+#Calculates the number of trajectories to use for training, validation, and testing based 
+#on the total number and the percentages.
 Num_train_trajectories = int(training_percentage * Num_total_trajectories)  # 285
 Num_validation_trajectories = int(validation_percentage * Num_total_trajectories)  # 171
 Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
 
+#---------------------------------------------------------------------------------------------------------
+#This is the number of training trajectories to actually use.
 # Override for experiments with smaller training sets
 Used_Num_train_trajectories = 4
+#---------------------------------------------------------------------------------------------------------
+
+#This is the folder where the trajectory data is stored. 
 trajectory_folder = "data/mojoco_trajectories"  # Folder where the trajectory .pt files are stored
 
+#Calculates the ranges of trajectory indices to use for training, validation, and testing.
 train_range = range(0, Used_Num_train_trajectories)
 val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
 test_range  = range(Num_train_trajectories + Num_validation_trajectories, Num_total_trajectories)
@@ -54,19 +69,33 @@ print(f"Validation range: {(val_range)}")
 print(f"Test range: {(test_range)}")
 
 
+#-----------------------------------------------------------------------------------------------------
 
 #Sets the number of nodes per edge. at 2 nodes per edge there is 8 nodes, each one at a corner of the cube.
 nodes_per_edge = 2
 
+#Sets the number of nearest neighbors to use for creating edges in the graph.
 K_nearest_neighbors = 3
 
-#ADD COMMENT -------------------------------------------------------------------------------------
+#Sets the number of message passing layers in the GNN, and the number of times to repeat the 
+#blocks of message passing layers.
 message_passing_layers = 10
 repeat_blocks = 3
 
+#This is the batch size for training.
 batch_size=64
+
+#This is the total number of optimizer steps to train for. The paper trained for 1 million steps, 
+#so we use that as the default.
 steps = 1000000
+
+#This is the number of timesteps in each trajectory. The paper used 100 timesteps,
+#so we use that as the default.
 traj_timesteps = 100
+
+#This is an important parameter that sets how many past positions the model can see when making
+#its predictions. Basically giving the model more past positions can give it information about
+#the velocity and acceleration of the nodes, which can help it make better predictions.
 pos_history = 2
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
@@ -79,11 +108,14 @@ weights_only_load = False
 #Set to False if your dataset is already unscaled, or True to apply unscale_position_velocity 
 unscale_trajectory_data = False
 
-
+#This will compute the number of epochs to train for based on the number of trajectories we
+# are using, the target number of optimizer steps, the batch size, and the accumulation steps.
 epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
 
 print("Training for {} epochs".format(epochs))
 
+#Sets how often the program will save a checkpoint of the model during training,
+# and how often it will check the validation loss.
 epoch_checkpoint_interval = 2000
 validation_check_interval = 25
 
@@ -99,13 +131,16 @@ show_rollout = True
 
 #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #---------------------------------------------------------------------------------------------------------
+#This adds an extra name to the saved model and dataset files, which is useful for keeping track of different experiments when you are training multiple models with different parameters.
 extra_name = "" #CHANGE THIS---------------------------------------------------------------------------------------------------------
 #---------------------------------------------------------------------------------------------------------
 #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+#------------------------------------------------------------------------------------------------------
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
+#------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
 save_model_path = f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt"
@@ -122,6 +157,10 @@ inference_model_path = f"models/mojoco_{Used_Num_train_trajectories}_train{extra
 
 #Trains the GNN model
 if Train:
+
+    #Makes sure if we are resuming from a checkpoint, we don't accidentally rebuild the
+    # datasets, which would lead to inconsistent training since the model would be trained
+    # on different data than it was originally trained on before the checkpoint.
     if resume_training_checkpoint_path is not None and rebuild_datasets:
         print("Resume checkpoint detected. Forcing rebuild_datasets=False for consistent continuation.")
         rebuild_datasets = False
@@ -164,7 +203,11 @@ node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_
     throw_number=0,
     nodes_per_edge=nodes_per_edge,
     nearest_neighbors=K_nearest_neighbors,
+    data_folder=trajectory_folder,
+    weights_only=weights_only_load,
+    unscale_data=unscale_trajectory_data
 )
+
 node_dim = node_feat.shape[2]
 edge_dim = edge_feat.shape[2]
 
@@ -178,6 +221,8 @@ nodes_body = torch.tensor(
 #This model will be used for the rollouts and visualizations later in the code.
 model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K=repeat_blocks)
 
+#Checks to see if we specified a model to load for inference. If not, it 
+#loads the best model saved during training.
 if inference_model_path is None:
     load_model_path = os.path.splitext(save_model_path)[0] + "_best_model.pt"
 else:
@@ -185,13 +230,20 @@ else:
 
 print(f"Loading model from {load_model_path} for evaluation")
 
+#loads the model state dict from the specified path. The code checks if the loaded object
+#is a dictionary containing a "model_state_dict" key, which is a common format for saving 
+#checkpoints that include additional information like optimizer state and training epoch. 
 loaded_obj = torch.load(load_model_path, map_location=device, weights_only=False)
 if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
     model.load_state_dict(loaded_obj["model_state_dict"])
 else:
     model.load_state_dict(loaded_obj)
 
+#Moves the model to the GPU for faster computations.
 model.to(device)
+
+#Sets the model to evaluation mode, which is important for certain layers 
+#like dropout and batch normalization that behave differently during training and evaluation.
 model.eval()
 
 #This loads the normalization statistics that were used to normalize the data during training.
@@ -205,13 +257,15 @@ e_std = norm_stats["e_std"]
 accel_std = norm_stats["acc_std"]
 accel_mean = norm_stats["acc_mean"]
 
-#Load saved loss history for plotting.
+#Sets the loss history path
 loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
 train_loss_epochs = []
 train_loss_values = []
 val_loss_epochs = []
 val_loss_values = []
 
+#Loads the loss history from the specified path. This is used to plot the training and 
+#validation loss curves later in the code. 
 if os.path.exists(loss_history_path):
     loss_history = torch.load(loss_history_path, map_location="cpu", weights_only=False)
     train_loss_epochs = list(loss_history.get("train_loss_epochs", []))
@@ -222,9 +276,10 @@ if os.path.exists(loss_history_path):
 else:
     print(f"Loss history file not found: {loss_history_path}")
 
+#Shows the loss curve
 if display_loss_curves:
     os.makedirs("Plots", exist_ok=True)
-    evaluate_metrics.plot_loss_curves(
+    display_results.plot_loss_curves(
         train_loss_epochs=train_loss_epochs,
         train_loss_values=train_loss_values,
         val_loss_epochs=val_loss_epochs,
@@ -234,7 +289,8 @@ if display_loss_curves:
         show_plot=True
     )
 
-
+#This evaluates the model on the test set and prints out various metrics like mean positon error, 
+#mean angle error, and mean penitration error
 if display_stats:
     evaluate_metrics.evaluate_model(model, Floor, test_range, nodes_per_edge, K_nearest_neighbors, nodes_body, 
                        accel_std, accel_mean, x_mean, x_std, e_mean, e_std)
@@ -293,5 +349,3 @@ if show_rollout:
         edge_info=edge_info,
         save_path="Gifs/Big_2500_final_one.gif"
     )
-
-

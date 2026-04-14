@@ -121,9 +121,10 @@ def add_random_walk_noise(positions, noise_scale=3e-4):
 
     return noisy
 
-
+#This function returns the full clean positions of the nodes for each timestep in the trajectory, as well as the edge indices 
+#and the body-centered node positions.
 def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, data_folder="data/tosses_processed", weights_only=True, unscale_data=True):
-    """Returns full clean (T, N, 3) positions and edge_index. No noise, no features."""
+
     data_path = os.path.join(data_folder, f"{throw_number}.pt")
     data = torch.load(data_path, weights_only=weights_only)
     states = data[0].float()
@@ -152,8 +153,7 @@ def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=
 #of the trajectory. The node features include finite difference velocity features and distance to the wall, while the edge features
 #include the relative position between connected nodes, the undeformed edge displacement, and their norms. The function returns
 #the node features, edge features, edge indices, and the true positions of the nodes for each timestep, which can be used for 
-#training the GNN model. The function also has an option to add random walk noise to the positions during training for data 
-#augmentation.
+#training the GNN model.
 def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, h=2, training=False, data_folder="data/tosses_processed", weights_only=True, unscale_data=True):
 
     #This is the data path for the raw trajectories from the paper. The function loads the data for the specified throw number, 
@@ -211,11 +211,6 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
     #N is the number of nodes, and 3 corresponds to the x,y,z coordinates.
     all_positions = torch.stack(all_positions)
 
-    #If the training flag is set to True, the function applies random walk noise to the positions of the nodes over 
-    #time using the add_random_walk_noise function defined earlier. This is used for data augmentation during training 
-    #to make the model more robust to small perturbations in the trajectories.
-    if training:
-        all_positions = add_random_walk_noise(all_positions)
 
     node_features = []
     edge_features = []
