@@ -18,11 +18,10 @@ def random_quat():
 
 #Takes in the initial conditions and parameters for a MuJoCo simulation, runs the simulation for a specified number of steps, 
 #and returns the trajectory of the cube's position and orientation over time.
-def collect_trajectory(wind_vector, initial_pos, initial_quat, initial_vel,
+def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_vel,
                        initial_angvel, mass, n_steps=1000, visualize=False):
     
     #Loads the model into MuJoCo, sets the initial conditions and parameters and resets the simulation data.
-    model = mujoco.MjModel.from_xml_path("cube.xml")
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data)
 
@@ -99,12 +98,18 @@ def generate_random_params(mass, wind_range, horizontal_pos_range, vertical_pos_
 
 
 if __name__ == "__main__":
-    #Sets the directory the trajectories will be saved to.
-    save_dir = "data/mojoco_trajectories"
+    # Get the directory of the current script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Sets the directory the trajectories will be saved to.
+    save_dir = os.path.join(script_dir, "data", "mojoco_trajectories")
     os.makedirs(save_dir, exist_ok=True)
 
+    #Loads the MuJoCo model from the XML file, which defines the cube and its properties. 
+    model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
+
     #Sets the number of trajectories we will generate aswell as how long the simulation will run for.
-    n_trajectories = 512
+    n_trajectories = 1024
     n_steps = 200
 
     #Sets whether we want to see one of the trajectories visualized.
@@ -125,6 +130,7 @@ if __name__ == "__main__":
 
         #Collects the trajectories.
         traj = collect_trajectory(
+            model=model,
             wind_vector=params['wind'],
             initial_pos=params['pos'],
             initial_quat=params['quat'],

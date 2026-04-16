@@ -35,8 +35,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
 
 #This is the total number of trajectories in the dataset. 
-#The paper used 570 trajectories, so we use that as the default.
-Num_total_trajectories = 512
+Num_total_trajectories = 1024
 
 #This sets the percentage of trajectories to use for training, validation, and testing.
 training_percentage = 0.5
@@ -45,14 +44,14 @@ testing_percentage = 0.2
 
 #Calculates the number of trajectories to use for training, validation, and testing based 
 #on the total number and the percentages.
-Num_train_trajectories = int(training_percentage * Num_total_trajectories)  # 285
-Num_validation_trajectories = int(validation_percentage * Num_total_trajectories)  # 171
-Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  # 114
+Num_train_trajectories = int(training_percentage * Num_total_trajectories)  
+Num_validation_trajectories = int(validation_percentage * Num_total_trajectories)  
+Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  
 
 #---------------------------------------------------------------------------------------------------------
 #This is the number of training trajectories to actually use.
 # Override for experiments with smaller training sets
-Used_Num_train_trajectories = 4
+Used_Num_train_trajectories = 512
 #---------------------------------------------------------------------------------------------------------
 
 #Get the directory of this script for relative path resolution
@@ -82,19 +81,17 @@ K_nearest_neighbors = 3
 
 #Sets the number of message passing layers in the GNN, and the number of times to repeat the 
 #blocks of message passing layers.
-message_passing_layers = 10
-repeat_blocks = 3
+message_passing_layers = 5
+repeat_blocks = 1
 
 #This is the batch size for training.
 batch_size=64
 
-#This is the total number of optimizer steps to train for. The paper trained for 1 million steps, 
-#so we use that as the default.
-steps = 1000000
+#This is the total number of optimizer steps to train for. 
+steps = 100000
 
-#This is the number of timesteps in each trajectory. The paper used 100 timesteps,
-#so we use that as the default.
-traj_timesteps = 100
+#This is the number of timesteps in each trajectory. 
+traj_timesteps = 200
 
 #This is an important parameter that sets how many past positions the model can see when making
 #its predictions. Basically giving the model more past positions can give it information about
@@ -119,8 +116,8 @@ print("Training for {} epochs".format(epochs))
 
 #Sets how often the program will save a checkpoint of the model during training,
 # and how often it will check the validation loss.
-epoch_checkpoint_interval = 2000
-validation_check_interval = 25
+epoch_checkpoint_interval = 100
+validation_check_interval = 10
 
 #Sets which visuals you want to turn on.
 #Meshed cube shows the initial node positions and edges. 

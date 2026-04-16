@@ -146,7 +146,9 @@ class GNSModel(nn.Module):
         x = self.node_encoder(data.x)
         edge_attr = self.edge_encoder(data.edge_attr)
 
-        #ADD COMMENT -------------------------------------------------------------------------------------
+        #This is the main message passing loop, where the node features are updated based on the edge features and 
+        #neighboring node features. The number of iterations of message passing is determined by the parameter L, 
+        #and the number of times the blocks are repeated is determined by K.
         for _ in range(self.K):  
             for layer in self.processor_layers: 
                 x, edge_attr = layer(x, data.edge_index, edge_attr)
@@ -172,7 +174,7 @@ def build_dataset(Wall, traj_range,
     #Runs through each trajectory in the specified range
     for throw_number in traj_range:
         print(f"Processing trajectory {throw_number}")
-        positions, edge_index, nodes_body  = get_clean_positions(
+        positions, edge_index, nodes_body, wind_vector  = get_clean_positions(
             Wall,
             throw_number,
             nodes_per_edge=nodes_per_edge,
@@ -181,7 +183,7 @@ def build_dataset(Wall, traj_range,
             weights_only=weights_only,
             unscale_data=unscale_data,
         )
-        dataset.append({"positions": positions, "edge_index": edge_index, "nodes_body": nodes_body})
+        dataset.append({"positions": positions, "edge_index": edge_index, "nodes_body": nodes_body, "wind_vector": wind_vector})
 
     return dataset
 
@@ -221,7 +223,10 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
         wall_n = torch.tensor(Wall.normal, dtype=torch.float32)
         wall_c = torch.tensor(Wall.center_position, dtype=torch.float32)
         dist = torch.sum((noisy_positions[t] - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
-        x_node = torch.cat([v_fd, dist], dim=1)
+        wind_vector=traj["wind_vector"]
+        N = noisy_positions.shape[1]
+        wind_expanded = wind_vector.unsqueeze(0).expand(N, -1)  # [3] -> [N, 3]
+        x_node = torch.cat([v_fd, wind_expanded, dist], dim=1)
 
         #Find the edge features for the current timestep by taking the difference between the noisy positions of the sender 
         #and receiver nodes.
@@ -252,33 +257,45 @@ def random_z_rotation():
 
 #This function applies a random rotation to the node features, edge features, and target accelerations in a batch of data.
 def rotate_batch(batch):
-
+    
     #Gets the device of the input data
     device = batch.x.device
 
     #Generates a random rotation matrix for rotating the data around the z-axis.
     R = random_z_rotation().to(device)
 
+    #Gets the length of the state vector. From this we can tell how many velocity history steps there are 
+    # (since we know the distance feature is always 1 dim and at the end), which allows us to correctly reshape 
+    # the velocity features for rotation. We also know there is a wind vector in the -4:-1 dims,
+    state_vector_length = len(batch.x[0])
+
+    #Calculates the number of velocity vectors in the node features by taking the total length of the state vector,
+    # subtracting 1 for the distance feature and 3 for the wind vector, and then dividing by 3 (the dimension of each velocity vector).
+    num_vel_vectors = (state_vector_length - 1 - 3) // 3
+
+
     # ---- Rotate node features ----
-    # x contains [v_t, v_tm1, dist]
-    # So rotate only first 6 dims (2 velocity vectors)
+    # x contains [v_t, v_tm1, v_{t-2},..., wind_vector, dist]
 
 
-    #Extracts the velocity and distance features from the node features. 
-    #The velocity features are the first 6 dimensions (v_t and v_{t-1}),
-    #and the distance features are the remaining dimensions.
-    v = batch.x[:, :6] 
-    dist = batch.x[:, 6:]
+    #Extracts the velocity features, wind vector, and distance feature from the node features in batch.x
+    # based on the calculated number of velocity vectors.
+    v = batch.x[:, :num_vel_vectors*3] 
+    wind_vector = batch.x[:, num_vel_vectors*3:num_vel_vectors*3 + 3]
+    dist = batch.x[:, num_vel_vectors*3 + 3:num_vel_vectors*3 + 4]
 
     #The velocity features are reshaped to separate the current and previous velocity vectors,
     #then rotated using the random rotation matrix R, and finally reshaped back to the original format.
-    v = v.view(-1, 2, 3)
+    v = v.view(-1, num_vel_vectors, 3)
     v = torch.matmul(v, R.T)
-    v = v.view(-1, 6)
+    v = v.view(-1, num_vel_vectors * 3)
+
+    #Rotates the wind vector using the same random rotation matrix R to ensure consistency in the data augmentation.
+    wind_vector = wind_vector @ R.T
 
     #The rotated velocity features are concatenated with the distance features to form the new node features, 
     #which are then assigned back to batch.x.
-    batch.x = torch.cat([v, dist], dim=1)
+    batch.x = torch.cat([v, wind_vector, dist], dim=1)
 
     # ---- Rotate edge features ----
     # edge_attr = [d, d_norm, dU, dU_norm]
@@ -302,6 +319,8 @@ def rotate_batch(batch):
 
     #The target accelerations in batch.y are also rotated using the same random rotation matrix R.
     batch.y = batch.y @ R.T
+
+
 
     return batch
 
@@ -376,20 +395,6 @@ def train_gnn(Wall,
         dataset_val = torch.load(save_val_dataset_path, weights_only=False)
         print(f"Validation dataset loaded from {save_val_dataset_path}")
 
-    #Ensure dataset is in trajectory format expected by online-noise training.
-    if len(dataset_train) > 0:
-        first = dataset_train[0]
-        if not (isinstance(first, dict) and "positions" in first and "edge_index" in first):
-            raise ValueError(
-                "Loaded training dataset is in legacy format. Set rebuild_datasets=True to rebuild trajectory datasets."
-            )
-
-    if len(dataset_val) > 0:
-        first = dataset_val[0]
-        if not (isinstance(first, dict) and "positions" in first and "edge_index" in first):
-            raise ValueError(
-                "Loaded validation dataset is in legacy format. Set rebuild_datasets=True to rebuild trajectory datasets."
-            )
 
     #Compute normalization stats from one clean pass (no noise) over training trajectories.
     clean_samples = []
@@ -521,9 +526,9 @@ def train_gnn(Wall,
         optimizer.zero_grad()
 
         effective_accumulation = min(accumulation_steps, len(loader))
-
+        
         for i, batch in enumerate(loader):
-
+            
             #Moves the batch to the GPU
             batch = batch.to(device)
 

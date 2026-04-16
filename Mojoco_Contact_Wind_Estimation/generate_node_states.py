@@ -147,7 +147,10 @@ def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=
         R = quat_to_rotmat(state[3:7])
         all_positions.append((R @ nodes_body.T).T + state[:3])
 
-    return torch.stack(all_positions), edge_index, nodes_body   
+    wind_vector = data[1]
+    mass = data[2]
+
+    return torch.stack(all_positions), edge_index, nodes_body, wind_vector
 
 #This function will take in a given trajectory from the dataset, and will compute the node and edge states for each timestep
 #of the trajectory. The node features include finite difference velocity features and distance to the wall, while the edge features
@@ -161,6 +164,7 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
     data_path = os.path.join(data_folder, f"{throw_number}.pt")
     data = torch.load(data_path, weights_only=weights_only)
     states = data[0].float()
+    wind_vector = data[1]
     if unscale_data:
         unscaled_states = unscale_position_velocity(states)
     else:
@@ -237,7 +241,8 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
 
         #Adds the distance to the wall as an additional feature to the velocity features for each node, 
         #creating the final node features for the current timestep.
-        node_feat = torch.cat([v_fd, dist], dim=1)  # (N, 3h+1)
+        wind_expanded = wind_vector.unsqueeze(0).expand(len(all_positions[t]), -1) 
+        node_feat = torch.cat([v_fd,wind_expanded, dist], dim=1)  
         node_features.append(node_feat)
 
         #For each edge, the function computes the relative position d between the sender and receiver nodes, 

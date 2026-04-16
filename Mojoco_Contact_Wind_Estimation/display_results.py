@@ -1,3 +1,5 @@
+import os
+
 import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -89,6 +91,11 @@ def rollout_trajectory_feedback_shape_match(
     weights_only_load=False,
     unscale_trajectory_data=False
 ):
+    
+    #Loads the trajectory data for the specified throw number from the dataset, and extracts the wind vector
+    data = torch.load(os.path.join(trajectory_folder, f"{throw_number}.pt"), weights_only=False)
+    wind_vector = data[1]  
+
 
     #First generates the node features, edge features, edge indices, and true positions for the specified trajectory in the dataset.
     node_feat, edge_feat, edge_index, true_positions = get_gns_features(
@@ -156,7 +163,8 @@ def rollout_trajectory_feedback_shape_match(
             x_mean=x_mean,
             x_std=x_std,
             e_mean=e_mean,
-            e_std=e_std
+            e_std=e_std,
+            wind_vector=wind_vector
         )
 
         #Constructs a PyTorch Geometric Data object with the node features, edge indices, and edge features,
@@ -355,22 +363,17 @@ def animate_cube(
 #using the current predicted positions, the previous two predicted positions, the edge indices,
 #rest positions, wall information, and normalization statistics if provided.
 def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
-                             x_mean=None, x_std=None, e_mean=None, e_std=None):
-    
-    #Computes the velocities of the current time step and the previous time step by taking the difference 
-    #between the predicted positions at the current and previous time steps.
+                             wind_vector=None, x_mean=None, x_std=None, e_mean=None, e_std=None):
     v_t = x_t - x_tm1
     v_tm1 = x_tm1 - x_tm2
 
-    #Computes the distance to the wall if the Wall information is provided, and concatenates it to the node features.
-    #Also clips the distance to the wall to be between 0 and 0.5, which is a reasonable range for the distances in this dataset.
-    if Wall is not None:
-        wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
-        wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
-        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
-        x_node = torch.cat([v_t, v_tm1, b], dim=-1)
-    else:
-        x_node = torch.cat([v_t, v_tm1], dim=-1)
+    wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
+    wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
+    b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+
+    N = x_t.shape[0]
+    wind_expanded = wind_vector.unsqueeze(0).expand(N, -1).to(x_t.device)
+    x_node = torch.cat([v_t, v_tm1, wind_expanded, b], dim=-1)
 
 
     #Calculates the edge features based on the current predicted positions and the rest positions, as well as the edge indices.
