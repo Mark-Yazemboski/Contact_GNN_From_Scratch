@@ -143,7 +143,9 @@ Train = False
 #------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
-save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
+# save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_train/{Used_Num_train_trajectories}_train_gns_model.pt")
+
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
 rebuild_datasets = True
@@ -153,7 +155,8 @@ resume_training_checkpoint_path = None
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
-inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = None
+# inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 #Trains the GNN model
 if Train:

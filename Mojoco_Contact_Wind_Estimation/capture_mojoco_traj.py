@@ -115,12 +115,14 @@ if __name__ == "__main__":
     #Sets whether we want to see one of the trajectories visualized.
     visualize_first = False
 
+    wind_range = (0, 5)
+
     #Runs for the specified number of trajectories, generating random parameters for each one,
     # running the simulation to collect the trajectory data,
     for i in range(n_trajectories):
 
         #Generates the random initial conditions and parameters for the simulation
-        params = generate_random_params(mass = 0.37, wind_range=(0, 5), horizontal_pos_range=(-0.2, 0.2), vertical_pos_range=(0.3, 0.8), horizontal_speed_range=(-1.25, 1.25), vertical_speed_range=(-0.3, 0.3), angvel_range=(-3, 3))
+        params = generate_random_params(mass = 0.37, wind_range=wind_range, horizontal_pos_range=(-0.2, 0.2), vertical_pos_range=(0.3, 0.8), horizontal_speed_range=(-1.25, 1.25), vertical_speed_range=(-0.3, 0.3), angvel_range=(-3, 3))
         print(f"Trajectory {i}: wind={params['wind'].round(2)}, "
               f"mass={params['mass']:.2f}, "
               f"pos={params['pos'].round(2)}, "
