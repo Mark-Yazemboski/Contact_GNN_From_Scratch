@@ -19,7 +19,7 @@ def random_quat():
 #Takes in the initial conditions and parameters for a MuJoCo simulation, runs the simulation for a specified number of steps, 
 #and returns the trajectory of the cube's position and orientation over time.
 def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_vel,
-                       initial_angvel, mass, n_steps=1000, visualize=False):
+                       initial_angvel, mass, n_steps=1000,substeps= 10, visualize=False):
     
     #Loads the model into MuJoCo, sets the initial conditions and parameters and resets the simulation data.
     data = mujoco.MjData(model)
@@ -42,7 +42,9 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
         with mujoco.viewer.launch_passive(model, data) as viewer:
             time.sleep(3)  # wait for viewer to initialize
             for _ in range(n_steps):
-                mujoco.mj_step(model, data)
+                # Take multiple small physics steps per recorded frame
+                for _ in range(substeps):
+                    mujoco.mj_step(model, data)
                 states.append(np.concatenate([
                     data.qpos[:3].copy(),
                     data.qpos[3:7].copy(),
@@ -55,7 +57,8 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
     #If not visualizing, it will just run the simulation and record the trajectory data without rendering.
     else:
         for _ in range(n_steps):
-            mujoco.mj_step(model, data)
+            for _ in range(substeps):
+                    mujoco.mj_step(model, data)
             states.append(np.concatenate([
                 data.qpos[:3].copy(),
                 data.qpos[3:7].copy(),
@@ -67,7 +70,7 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
 
 #This function generates random initial conditions and parameters for the MuJoCo simulation, including a random wind vector,
 #initial position, orientation, velocity, and angular velocity of the cube, and returns them in a dictionary.
-def generate_random_params(mass, wind_range, horizontal_pos_range, vertical_pos_range, horizontal_speed_range, vertical_speed_range, angvel_range):
+def generate_toss_params(mass, wind_range, horizontal_pos_range, vertical_pos_range, horizontal_speed_range, vertical_speed_range, angvel_range):
      
     wind_dir = np.random.randn(3)
     wind_dir[2] = 0
@@ -94,43 +97,119 @@ def generate_random_params(mass, wind_range, horizontal_pos_range, vertical_pos_
         'vel': vel,
         'angvel': angvel,
         'mass': mass,
+        'type': 'toss',
+    }
+
+def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_range, half_width=0.0524):
+
+    #Wind uses the same logic as toss trajectories
+    wind_dir = np.random.randn(3)
+    wind_dir[2] = 0
+    wind_dir = wind_dir / (np.linalg.norm(wind_dir) + 1e-8)
+    wind_vec = wind_dir * np.random.uniform(wind_range[0], wind_range[1])
+
+    #Start sitting on the floor with random x/y position
+    pos = np.array([
+        np.random.uniform(-0.2, 0.2),
+        np.random.uniform(-0.2, 0.2),
+        half_width,
+    ])
+
+    #Random rotation around z only so the cube sits flat on the floor
+    theta = np.random.uniform(0, 2 * np.pi)
+    quat = Rotation.from_euler('z', theta).as_quat(scalar_first=True)
+
+    #Horizontal velocity only — friction has to stop this
+    speed = np.random.uniform(sliding_speed_range[0], sliding_speed_range[1])
+    angle = np.random.uniform(0, 2 * np.pi)
+    vel = np.array([speed * np.cos(angle), speed * np.sin(angle), 0.0])
+
+    #Only spin around z axis so the cube doesn't tip over
+    angvel = np.array([0.0, 0.0, np.random.uniform(angvel_z_range[0], angvel_z_range[1])])
+
+    return {
+        'wind': wind_vec,
+        'pos': pos,
+        'quat': quat,
+        'vel': vel,
+        'angvel': angvel,
+        'mass': mass,
+        'type': 'sliding',
     }
 
 
 if __name__ == "__main__":
-    # Get the directory of the current script
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # Sets the directory the trajectories will be saved to.
-    save_dir = os.path.join(script_dir, "data", "mojoco_trajectories")
+    save_dir = os.path.join(script_dir, "data", "mojoco_trajectories_no_wind_wth_sliding")
     os.makedirs(save_dir, exist_ok=True)
 
-    #Loads the MuJoCo model from the XML file, which defines the cube and its properties. 
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
 
-    #Sets the number of trajectories we will generate aswell as how long the simulation will run for.
+    #----- Dataset parameters -----
     n_trajectories = 1024
     n_steps = 200
-
-    #Sets whether we want to see one of the trajectories visualized.
+    substeps = 50
     visualize_first = False
 
-    wind_range = (0, 5)
+    #What percentage of the total trajectories should be sliding-only (0.0 to 1.0)
+    sliding_percentage = 0.2
 
-    #Runs for the specified number of trajectories, generating random parameters for each one,
-    # running the simulation to collect the trajectory data,
+    #----- Shared parameters -----
+    wind_range = (0,0)
+    mass = 0.37
+
+    #----- Toss-specific parameters -----
+    toss_horizontal_pos_range = (-0.2, 0.2)
+    toss_vertical_pos_range = (0.3, 0.8)
+    toss_horizontal_speed_range = (-1.25, 1.25)
+    toss_vertical_speed_range = (-0.3, 0.3)
+    toss_angvel_range = (-3, 3)
+
+    #----- Sliding-specific parameters -----
+    sliding_speed_range = (0.3, 2.0)
+    sliding_angvel_z_range = (-3, 3)
+
+    #----- Build the schedule of which indices are sliding vs toss -----
+    n_sliding = int(n_trajectories * sliding_percentage)
+    n_toss = n_trajectories - n_sliding
+
+    #Spread sliding trajectories evenly throughout the dataset so that 
+    #training batches always contain a mix of both types.
+    sliding_indices = set()
+    if n_sliding > 0:
+        spacing = n_trajectories / n_sliding
+        for k in range(n_sliding):
+            sliding_indices.add(int(k * spacing))
+
+    print(f"Total: {n_trajectories} | Toss: {n_toss} | Sliding: {n_sliding} ({sliding_percentage*100:.0f}%)")
+
     for i in range(n_trajectories):
 
-        #Generates the random initial conditions and parameters for the simulation
-        params = generate_random_params(mass = 0.37, wind_range=wind_range, horizontal_pos_range=(-0.2, 0.2), vertical_pos_range=(0.3, 0.8), horizontal_speed_range=(-1.25, 1.25), vertical_speed_range=(-0.3, 0.3), angvel_range=(-3, 3))
-        print(f"Trajectory {i}: wind={params['wind'].round(2)}, "
+        if i in sliding_indices:
+            params = generate_sliding_params(
+                mass=mass,
+                wind_range=wind_range,
+                sliding_speed_range=sliding_speed_range,
+                angvel_z_range=sliding_angvel_z_range,
+            )
+        else:
+            params = generate_toss_params(
+                mass=mass,
+                wind_range=wind_range,
+                horizontal_pos_range=toss_horizontal_pos_range,
+                vertical_pos_range=toss_vertical_pos_range,
+                horizontal_speed_range=toss_horizontal_speed_range,
+                vertical_speed_range=toss_vertical_speed_range,
+                angvel_range=toss_angvel_range,
+            )
+
+        print(f"Trajectory {i} [{params['type']}]: wind={params['wind'].round(2)}, "
               f"mass={params['mass']:.2f}, "
               f"pos={params['pos'].round(2)}, "
-              f"vel={params['vel']}, "
-                f"angvel={params['angvel']}"
-              )
+              f"vel={params['vel'].round(3)}, "
+              f"angvel={params['angvel'].round(3)}")
 
-        #Collects the trajectories.
         traj = collect_trajectory(
             model=model,
             wind_vector=params['wind'],
@@ -140,22 +219,21 @@ if __name__ == "__main__":
             initial_angvel=params['angvel'],
             mass=params['mass'],
             n_steps=n_steps,
+            substeps=substeps,
             visualize=True if i == 0 and visualize_first else False
         )
 
-        #Saves everything in a list as a .pt file, which includes the trajectory data as well as the initial conditions
-        # and parameters for each simulation.
         traj_tensor = torch.tensor(traj, dtype=torch.float32)
         save_data = [
-            traj_tensor,                                              # [0] trajectory - what generate_node_states expects
-            torch.tensor(params['wind'], dtype=torch.float32),        # [1] wind
-            params['mass'],                                           # [2] mass
-            params,                                                   # [3] params
+            traj_tensor,
+            torch.tensor(params['wind'], dtype=torch.float32),
+            params['mass'],
+            params,
         ]
 
         save_path = os.path.join(save_dir, f"{i}.pt")
         torch.save(save_data, save_path)
         print(f"Saved trajectory {i}")
     
-
     print(f"\nSaved {n_trajectories} trajectories to {save_dir}/")
+    print(f"  Toss: {n_toss} | Sliding: {n_sliding}")

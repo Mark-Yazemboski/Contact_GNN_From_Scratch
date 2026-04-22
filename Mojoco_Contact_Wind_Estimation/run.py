@@ -58,7 +58,7 @@ Used_Num_train_trajectories = 512
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 #This is the folder where the trajectory data is stored. 
-trajectory_folder = os.path.join(script_dir, "data/mojoco_trajectories")  # Folder where the trajectory .pt files are stored
+trajectory_folder = os.path.join(script_dir, "data/mojoco_trajectories_no_wind_wth_sliding")  # Folder where the trajectory .pt files are stored
 
 #Calculates the ranges of trajectory indices to use for training, validation, and testing.
 train_range = range(0, Used_Num_train_trajectories)
@@ -85,7 +85,10 @@ message_passing_layers = 5
 repeat_blocks = 1
 
 #This is the batch size for training.
-batch_size=64
+batch_size=128
+
+#This is the learning rate for training the GNN.
+learning_rate = 4e-4
 
 #This is the total number of optimizer steps to train for. 
 steps = 100000
@@ -139,12 +142,12 @@ extra_name = "" #CHANGE THIS----------------------------------------------------
 #------------------------------------------------------------------------------------------------------
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
 #------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_train/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding/{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -183,7 +186,7 @@ if Train:
         epochs=epochs, 
         batch_size=batch_size, 
         accumulation_steps=accumulation_steps,
-        lr=1e-4,
+        lr=learning_rate,
         trajectory_folder=trajectory_folder,
         weights_only=weights_only_load,
         unscale_data=unscale_trajectory_data,

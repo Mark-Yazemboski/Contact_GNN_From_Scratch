@@ -1,6 +1,6 @@
 <mujoco>
-  <option timestep="0.00674" gravity="0 0 -9.81"
-          density="1.225" viscosity="1.5e-5" wind="10 0 0"/>
+  <option timestep="0.0001348" gravity="0 0 -9.81"
+          density="1.225" viscosity="1.5e-5" wind="10 0 0" integrator="implicit"/>
 
   <worldbody>
     <light diffuse="0.8 0.8 0.8" pos="0 0 3" dir="0 0 -1"/>
