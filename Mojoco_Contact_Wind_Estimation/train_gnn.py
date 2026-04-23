@@ -347,7 +347,8 @@ def train_gnn(Wall,
               unscale_data=True,
               resume_checkpoint_path=None,
               epoch_checkpoint_interval=500,
-              validation_check_interval=20):
+              validation_check_interval=20,
+              noise_scale=3e-4):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -515,7 +516,7 @@ def train_gnn(Wall,
         #Resample noise each epoch and rebuild training samples/loader.
         noisy_samples = []
         for traj in dataset_train:
-            noisy_samples.extend(_build_timestep_samples(traj, Wall, h=h))
+            noisy_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=noise_scale))
 
         _apply_input_normalization(noisy_samples, x_mean, x_std, e_mean, e_std)
         _apply_accel_normalization(noisy_samples, acc_mean, acc_std)

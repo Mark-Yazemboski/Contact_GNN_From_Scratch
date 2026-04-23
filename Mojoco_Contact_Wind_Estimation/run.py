@@ -90,6 +90,10 @@ batch_size=128
 #This is the learning rate for training the GNN.
 learning_rate = 4e-4
 
+#Noise scale for data augmentation. This is the standard deviation of the Gaussian noise added to the input positions
+# during training to help regularize the model and improve generalization.
+noise_scale = 1e-3
+
 #This is the total number of optimizer steps to train for. 
 steps = 100000
 
@@ -99,7 +103,7 @@ traj_timesteps = 200
 #This is an important parameter that sets how many past positions the model can see when making
 #its predictions. Basically giving the model more past positions can give it information about
 #the velocity and acceleration of the nodes, which can help it make better predictions.
-pos_history = 2
+pos_history = 3
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
@@ -127,7 +131,7 @@ validation_check_interval = 10
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 display_loss_curves = True
-display_stats = True
+display_stats = False
 show_meshed_cube = False
 show_augmentation = False
 show_rollout = True
@@ -142,12 +146,12 @@ extra_name = "" #CHANGE THIS----------------------------------------------------
 #------------------------------------------------------------------------------------------------------
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = True
+Train = False
 #------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_noise_h/{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -155,10 +159,13 @@ rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
 resume_training_checkpoint_path = None
+# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding/{Used_Num_train_trajectories}_train_gns_model_epoch400.pt")
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
-inference_model_path = None
+# inference_model_path = None
+inference_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_noise_h/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+
 # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 #Trains the GNN model
@@ -197,7 +204,8 @@ if Train:
         repeat_blocks=repeat_blocks,
         resume_checkpoint_path=resume_training_checkpoint_path,
         epoch_checkpoint_interval=epoch_checkpoint_interval,
-        validation_check_interval = validation_check_interval
+        validation_check_interval = validation_check_interval,
+        noise_scale = noise_scale
     )
 
 
@@ -211,7 +219,8 @@ node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_
     nearest_neighbors=K_nearest_neighbors,
     data_folder=trajectory_folder,
     weights_only=weights_only_load,
-    unscale_data=unscale_trajectory_data
+    unscale_data=unscale_trajectory_data,
+    h = pos_history
 )
 
 node_dim = node_feat.shape[2]
@@ -299,7 +308,7 @@ if display_loss_curves:
 #mean angle error, and mean penitration error
 if display_stats:
     evaluate_metrics.evaluate_model(trajectory_folder, model, Floor, test_range, nodes_per_edge, K_nearest_neighbors, nodes_body, 
-                       accel_std, accel_mean, x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data)
+                       accel_std, accel_mean, x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,pos_history)
 
 
 
@@ -349,7 +358,8 @@ if show_rollout:
         shape_alpha= 1.0,
         return_edge_info=True,
         weights_only_load=weights_only_load,
-        unscale_trajectory_data=unscale_trajectory_data
+        unscale_trajectory_data=unscale_trajectory_data,
+        h = pos_history
         
     )  
     display_results.animate_cube(

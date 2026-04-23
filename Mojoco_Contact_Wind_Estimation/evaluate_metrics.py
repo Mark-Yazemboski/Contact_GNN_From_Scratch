@@ -101,7 +101,7 @@ def compute_metrics(pred_positions, true_positions, rest_positions):
 def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, nodes_per_edge,
                    nearest_neighbors,
                    rest_positions, accel_std, accel_mean,
-                   x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data):
+                   x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,h):
     
 
     all_center_errors = []
@@ -130,7 +130,8 @@ def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, node
             shape_alpha=1.0,
             return_edge_info=True,
             weights_only_load=weights_only_load,
-            unscale_trajectory_data=unscale_trajectory_data
+            unscale_trajectory_data=unscale_trajectory_data,
+            h = h
         )
 
         #Computes the metrics for the current trajectory and appends them to the lists for averaging later.

@@ -139,31 +139,21 @@ def rollout_trajectory_feedback_shape_match(
 
     #Sets the initial predicted positions to be the same as the true positions for the first three frames,
     #which are used as the initial conditions for the rollout.
-    pred_positions = [
-        true_positions[0].clone(),
-        true_positions[1].clone(),
-        true_positions[2].clone(),
-    ]
+    pred_positions = [true_positions[t].clone() for t in range(h + 1)]
 
     #Performs the closed-loop rollout for the remaining frames in the trajectory, starting from frame 3.
     for _ in range(h, true_positions.shape[0] - 1):
 
-        #Unpacks the last three predicted positions, which are used to build the input features
-        #for the GNN model at the current step.
-        x_tm2 = pred_positions[-3]
-        x_tm1 = pred_positions[-2]
-        x_t = pred_positions[-1]
+        recent = pred_positions[-(h+1):]
 
         #This will take in the current predicted positions and the previous two predicted positions,
         #along with the edge indices, rest positions, and wall information, (Aswell as the normalization statistics if provided) 
         #and will output the node features and edge features that are used as input to the GNN model
         #for the current step of the rollout.
         x_node, e_attr = _build_feedback_features(
-            x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
-            x_mean=x_mean,
-            x_std=x_std,
-            e_mean=e_mean,
-            e_std=e_std,
+            recent, edge_index, rest_positions, Wall,
+            x_mean=x_mean, x_std=x_std,
+            e_mean=e_mean, e_std=e_std,
             wind_vector=wind_vector
         )
 
@@ -186,7 +176,7 @@ def rollout_trajectory_feedback_shape_match(
 
         #Integrates the predicted accelerations to get the next predicted positions (x_next) 
         #using a simple finite difference scheme,
-        x_next = a_t + 2.0 * x_t - x_tm1
+        x_next = a_t + 2.0 * recent[-1] - recent[-2]
 
         #If shape matching is enabled, it applies the shape matching function to the predicted positions to correct for drift,
         if do_shape_match:  
@@ -362,28 +352,30 @@ def animate_cube(
 #This function builds the node features and edge features for a given time step in the rollout, 
 #using the current predicted positions, the previous two predicted positions, the edge indices,
 #rest positions, wall information, and normalization statistics if provided.
-def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall,
+def _build_feedback_features(positions_history, edge_index, rest_positions, Wall,
                              wind_vector=None, x_mean=None, x_std=None, e_mean=None, e_std=None):
-    v_t = x_t - x_tm1
-    v_tm1 = x_tm1 - x_tm2
+    # positions_history is a list of h+1 position tensors, most recent last
+    x_t = positions_history[-1]
 
-    wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
-    wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
-    b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+    # Build h velocity vectors via finite differences
+    v_fd = []
+    for k in range(len(positions_history) - 1):
+        v_fd.append(positions_history[-(k+1)] - positions_history[-(k+2)])
+    v_fd = torch.cat(v_fd, dim=-1)
+
+    if Wall is not None:
+        wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
+        wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
+        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
 
     N = x_t.shape[0]
     wind_expanded = wind_vector.unsqueeze(0).expand(N, -1).to(x_t.device)
-    x_node = torch.cat([v_t, v_tm1, wind_expanded, b], dim=-1)
+    x_node = torch.cat([v_fd, wind_expanded, b], dim=-1)
 
-
-    #Calculates the edge features based on the current predicted positions and the rest positions, as well as the edge indices.
     src, dst = edge_index[0], edge_index[1]
-
-    #Distance vector between source and destination nodes for the current predicted positions, as well as its norm.
     d = x_t[src] - x_t[dst]
     d_norm = torch.norm(d, dim=-1, keepdim=True)
 
-    #Distance vector between source and destination nodes for the undeformed cube position, as well as its norm.
     if rest_positions is not None:
         d_u = rest_positions[src] - rest_positions[dst]
         d_u_norm = torch.norm(d_u, dim=-1, keepdim=True)
@@ -391,20 +383,13 @@ def _build_feedback_features(x_t, x_tm1, x_tm2, edge_index, rest_positions, Wall
         d_u = torch.zeros_like(d)
         d_u_norm = torch.zeros_like(d_norm)
 
-    #Combines the edge features into a single tensor, which includes the distance vector and its norm for both the 
-    #current predicted positions and the rest positions.
     e_attr = torch.cat([d, d_norm, d_u, d_u_norm], dim=-1)
 
-    #If normalization statistics are provided, it normalizes the node features and edge features using the provided
-    #means and standard deviations.
     if x_mean is not None and x_std is not None:
         x_node = (x_node - x_mean) / x_std
-
     if e_mean is not None and e_std is not None:
         e_attr = (e_attr - e_mean) / e_std
 
-    #Returns the node features and edge features for the current time step, which will be used as input to the GNN model
-    #for prediction.
     return x_node, e_attr
 
 
