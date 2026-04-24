@@ -146,7 +146,7 @@ extra_name = "" #CHANGE THIS----------------------------------------------------
 #------------------------------------------------------------------------------------------------------
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
 #------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
@@ -158,8 +158,8 @@ save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_n
 rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
-resume_training_checkpoint_path = None
-# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding/{Used_Num_train_trajectories}_train_gns_model_epoch400.pt")
+# resume_training_checkpoint_path = None
+resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_noise_h/{Used_Num_train_trajectories}_train_gns_model_epoch300.pt")
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
