@@ -131,7 +131,7 @@ validation_check_interval = 10
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 display_loss_curves = True
-display_stats = False
+display_stats = True
 show_meshed_cube = False
 show_augmentation = False
 show_rollout = True
@@ -146,7 +146,7 @@ extra_name = "" #CHANGE THIS----------------------------------------------------
 #------------------------------------------------------------------------------------------------------
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = True
+Train = False
 #------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
@@ -158,8 +158,8 @@ save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_n
 rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
-# resume_training_checkpoint_path = None
-resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_noise_h/{Used_Num_train_trajectories}_train_gns_model_epoch300.pt")
+resume_training_checkpoint_path = None
+# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_noise_h/{Used_Num_train_trajectories}_train_gns_model_epoch300.pt")
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
@@ -294,6 +294,7 @@ else:
 #Shows the loss curve
 if display_loss_curves:
     os.makedirs(os.path.join(script_dir, "Plots"), exist_ok=True)
+    print("Lowest validation loss: ", min(val_loss_values) if val_loss_values else "N/A")
     display_results.plot_loss_curves(
         train_loss_epochs=train_loss_epochs,
         train_loss_values=train_loss_values,
