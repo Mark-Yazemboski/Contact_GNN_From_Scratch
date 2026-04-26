@@ -141,13 +141,13 @@ def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_rang
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    save_dir = os.path.join(script_dir, "data", "mojoco_trajectories_no_wind_wth_sliding")
+    save_dir = os.path.join(script_dir, "data", "mojoco_trajectories_no_wind_2048")
     os.makedirs(save_dir, exist_ok=True)
 
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
 
     #----- Dataset parameters -----
-    n_trajectories = 1024
+    n_trajectories = 2048
     n_steps = 200
     substeps = 50
     visualize_first = False
