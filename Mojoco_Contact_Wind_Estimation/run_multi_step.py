@@ -1,9 +1,9 @@
 from random import random
 import torch
 import wall
-import train_gnn
+import train_gnn_multi_step
 import generate_node_states
-from train_gnn import GNSModel
+from train_gnn_multi_step import GNSModel
 import display_results 
 import evaluate_metrics
 import random
@@ -88,11 +88,11 @@ repeat_blocks = 1
 batch_size=128
 
 #This is the learning rate for training the GNN.
-learning_rate = 4e-4
+learning_rate = 1e-5
 
 #Noise scale for data augmentation. This is the standard deviation of the Gaussian noise added to the input positions
 # during training to help regularize the model and improve generalization.
-noise_scale = 3e-4
+noise_scale = 0
 
 #This is the total number of optimizer steps to train for. 
 steps = 100000
@@ -103,7 +103,10 @@ traj_timesteps = 200
 #This is an important parameter that sets how many past positions the model can see when making
 #its predictions. Basically giving the model more past positions can give it information about
 #the velocity and acceleration of the nodes, which can help it make better predictions.
-pos_history = 4
+pos_history = 3
+
+#This is the number of steps to rollout the model during training for the multi-step loss.
+multistep = 5
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
@@ -151,7 +154,7 @@ Train = False
 
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_h4/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_retrain_multistep_5_accel_No_Noise/{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -159,12 +162,19 @@ rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
 resume_training_checkpoint_path = None
-# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_noise_h/{Used_Num_train_trajectories}_train_gns_model_epoch300.pt")
+# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+
+#This will just load the model weights from the model location, but will not load the optimizer state or training epoch information.
+#This is useful if we want to use the initialization from a pretrained model, but we want to train it with different training 
+#parameters.
+# copy_weights_only_path = None
+copy_weights_only_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_h/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
 # inference_model_path = None
-inference_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_h4/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_retrain_multistep_5_accel_No_Noise/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
@@ -182,7 +192,7 @@ if Train:
     # where to save the datasets and model, whether to rebuild the datasets,
     # training epochs, batch size, learning rate, and GNN architecture parameters
     # like nodes per edge and message passing layers.
-    train_gnn.train_gnn(
+    train_gnn_multi_step.train_gnn(
         Floor, 
         train_range=train_range,
         val_range=val_range,
@@ -202,10 +212,12 @@ if Train:
         h = pos_history,
         message_passing_layers=message_passing_layers,
         repeat_blocks=repeat_blocks,
+        copy_weights_only_path=copy_weights_only_path,
         resume_checkpoint_path=resume_training_checkpoint_path,
         epoch_checkpoint_interval=epoch_checkpoint_interval,
         validation_check_interval = validation_check_interval,
-        noise_scale = noise_scale
+        noise_scale = noise_scale,
+        multistep=multistep
     )
 
 
