@@ -167,7 +167,7 @@ if __name__ == "__main__":
     toss_angvel_range = (-3, 3)
 
     #----- Sliding-specific parameters -----
-    sliding_speed_range = (0.1, 2.0)
+    sliding_speed_range = (0.0, 1.5)
     sliding_angvel_z_range = (-3, 3)
 
     #----- Build the schedule of which indices are sliding vs toss -----

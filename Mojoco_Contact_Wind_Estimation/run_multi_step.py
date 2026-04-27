@@ -35,7 +35,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
 
 #This is the total number of trajectories in the dataset. 
-Num_total_trajectories = 1024
+Num_total_trajectories = 2048
 
 #This sets the percentage of trajectories to use for training, validation, and testing.
 training_percentage = 0.5
@@ -51,14 +51,14 @@ Num_test_trajectories = int(testing_percentage * Num_total_trajectories)
 #---------------------------------------------------------------------------------------------------------
 #This is the number of training trajectories to actually use.
 # Override for experiments with smaller training sets
-Used_Num_train_trajectories = 512
+Used_Num_train_trajectories = 1024
 #---------------------------------------------------------------------------------------------------------
 
 #Get the directory of this script for relative path resolution
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 #This is the folder where the trajectory data is stored. 
-trajectory_folder = os.path.join(script_dir, "data/mojoco_trajectories_no_wind_wth_sliding")  # Folder where the trajectory .pt files are stored
+trajectory_folder = os.path.join(script_dir, "data/mojoco_trajectories_no_wind_2048")  # Folder where the trajectory .pt files are stored
 
 #Calculates the ranges of trajectory indices to use for training, validation, and testing.
 train_range = range(0, Used_Num_train_trajectories)
@@ -88,11 +88,11 @@ repeat_blocks = 1
 batch_size=128
 
 #This is the learning rate for training the GNN.
-learning_rate = 1e-5
+learning_rate = 4e-5
 
 #Noise scale for data augmentation. This is the standard deviation of the Gaussian noise added to the input positions
 # during training to help regularize the model and improve generalization.
-noise_scale = 0
+noise_scale = 3e-4
 
 #This is the total number of optimizer steps to train for. 
 steps = 100000
@@ -134,7 +134,7 @@ validation_check_interval = 10
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
 display_loss_curves = True
-display_stats = True
+display_stats = False
 show_meshed_cube = False
 show_augmentation = False
 show_rollout = True
@@ -154,7 +154,7 @@ Train = False
 
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_retrain_multistep_5_accel_No_Noise/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned/{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -168,13 +168,13 @@ resume_training_checkpoint_path = None
 #This is useful if we want to use the initialization from a pretrained model, but we want to train it with different training 
 #parameters.
 # copy_weights_only_path = None
-copy_weights_only_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding_new_h/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+copy_weights_only_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
 # inference_model_path = None
-inference_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_retrain_multistep_5_accel_No_Noise/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
