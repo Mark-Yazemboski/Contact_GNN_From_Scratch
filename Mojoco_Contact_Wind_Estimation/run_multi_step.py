@@ -58,7 +58,7 @@ Used_Num_train_trajectories = 1024
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 #This is the folder where the trajectory data is stored. 
-trajectory_folder = os.path.join(script_dir, "data/mojoco_trajectories_no_wind_2048")  # Folder where the trajectory .pt files are stored
+trajectory_folder = os.path.join(script_dir, "data/mojoco_pure_sliding_2048_no_wind")  # Folder where the trajectory .pt files are stored
 
 #Calculates the ranges of trajectory indices to use for training, validation, and testing.
 train_range = range(0, Used_Num_train_trajectories)
@@ -88,7 +88,7 @@ repeat_blocks = 1
 batch_size=128
 
 #This is the learning rate for training the GNN.
-learning_rate = 4e-5
+learning_rate = 4e-4
 
 #Noise scale for data augmentation. This is the standard deviation of the Gaussian noise added to the input positions
 # during training to help regularize the model and improve generalization.
@@ -106,7 +106,7 @@ traj_timesteps = 200
 pos_history = 3
 
 #This is the number of steps to rollout the model during training for the multi-step loss.
-multistep = 5
+multistep = 1
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
@@ -133,7 +133,7 @@ validation_check_interval = 10
 #Meshed cube shows the initial node positions and edges. 
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
-display_loss_curves = True
+display_loss_curves = False
 display_stats = False
 show_meshed_cube = False
 show_augmentation = False
@@ -154,7 +154,7 @@ Train = False
 
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/mojoco_pure_sliding_no_wind_fixed_noise/{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -162,19 +162,19 @@ rebuild_datasets = True
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
 resume_training_checkpoint_path = None
-# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_sliding/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned_wind_singlestep/{Used_Num_train_trajectories}_train_gns_model_epoch900.pt")
 
 #This will just load the model weights from the model location, but will not load the optimizer state or training epoch information.
 #This is useful if we want to use the initialization from a pretrained model, but we want to train it with different training 
 #parameters.
-# copy_weights_only_path = None
-copy_weights_only_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+copy_weights_only_path = None
+# copy_weights_only_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned_wind_singlestep/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
 # inference_model_path = None
-inference_model_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = os.path.join(script_dir, f"models/mojoco_pure_sliding_no_wind_fixed_noise/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
@@ -217,7 +217,8 @@ if Train:
         epoch_checkpoint_interval=epoch_checkpoint_interval,
         validation_check_interval = validation_check_interval,
         noise_scale = noise_scale,
-        multistep=multistep
+        multistep=multistep,
+        latent_dim=128
     )
 
 
@@ -375,6 +376,7 @@ if show_rollout:
         h = pos_history
         
     )  
+    evaluate_metrics.compute_metrics(pred_positions, true_positions, nodes_body)
     display_results.animate_cube(
         pred_positions,
         true_positions,

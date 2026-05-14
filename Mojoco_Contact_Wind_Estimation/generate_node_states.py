@@ -101,25 +101,48 @@ def quat_to_rotmat(q):
 
     return R
 
-#This function adds random walk noise to the positions of the nodes over time, which can be used to ensure the model 
-#is robust to small perturbations in the trajectories during training. The noise is added cumulatively over time, 
-#creating a random walk effect.
+# #This function adds random walk noise to the positions of the nodes over time, which can be used to ensure the model 
+# #is robust to small perturbations in the trajectories during training. The noise is added cumulatively over time, 
+# #creating a random walk effect.
+# def add_random_walk_noise(positions, noise_scale=3e-4):
+    
+#     #Creates a copy of the input positions to avoid modifying the original tensor, and initializes a 
+#     #noise tensor to accumulate the random walk noise over time.
+#     noisy_positions = positions.clone()
+#     T, N, _ = positions.shape
+#     noise = torch.zeros(N, 3, device=positions.device)
+
+#     #For each timestep, random noise is generated and added to the cumulative noise. 
+#     #This cumulative noise is then added to the positions for that timestep, creating a random walk effect over time.
+#     for t in range(T):
+#         step_noise = torch.randn(N, 3, device=positions.device) * noise_scale
+#         noise = noise + step_noise
+#         noisy_positions[t] = noisy_positions[t] + noise
+
+#     return noisy_positions
+
 def add_random_walk_noise(positions, noise_scale=3e-4):
     
-    #Creates a copy of the input positions to avoid modifying the original tensor, and initializes a 
-    #noise tensor to accumulate the random walk noise over time.
-    noisy = positions.clone()
-    T, N, _ = positions.shape
-    noise = torch.zeros(N, 3, device=positions.device)
+    velocities = positions[1:] - positions[:-1]
 
-    #For each timestep, random noise is generated and added to the cumulative noise. 
-    #This cumulative noise is then added to the positions for that timestep, creating a random walk effect over time.
+    T, N, _ = velocities.shape
+    noise = torch.zeros(T, N, 3, device=positions.device)
+
+
+
     for t in range(T):
         step_noise = torch.randn(N, 3, device=positions.device) * noise_scale
-        noise = noise + step_noise
-        noisy[t] = noisy[t] + noise
+        noise[t] = noise[t] + step_noise
+        velocities[t] = velocities[t] + noise[t]
+    
+    new_positions = torch.zeros_like(positions)
+    new_positions[0] = positions[0]
+    for t in range(1, T+1):
+        new_positions[t] = new_positions[t-1] + velocities[t-1]
 
-    return noisy
+    
+
+    return new_positions, noise
 
 #This function returns the full clean positions of the nodes for each timestep in the trajectory, as well as the edge indices 
 #and the body-centered node positions.

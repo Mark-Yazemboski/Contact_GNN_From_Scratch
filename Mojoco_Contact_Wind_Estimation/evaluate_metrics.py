@@ -85,6 +85,12 @@ def compute_metrics(pred_positions, true_positions, rest_positions):
 
     #Returns all of the metrics averaged across the trajectory, 
     #as well as the per-timestep values for each metric for further analysis if desired.
+    # print("Center error for whole trajectory:")
+    # print(center_errors)
+    # print("Angle error (degrees) for whole trajectory:")
+    # print(torch.rad2deg(angle_errors))
+    # print("Floor penetration for whole trajectory:")
+    # print(floor_penetrations)
     return {
         'center_error':            center_errors.mean().item(),
         'angle_error_deg':         torch.rad2deg(angle_errors).mean().item(),

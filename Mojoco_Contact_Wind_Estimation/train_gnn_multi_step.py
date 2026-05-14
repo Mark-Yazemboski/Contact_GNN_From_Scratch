@@ -195,7 +195,7 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
     clean_positions = traj["positions"]
 
     #Adds random walk noise to the clean positions to create noisy positions,
-    noisy_positions = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
+    noisy_positions, noise = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
 
     edge_index = traj["edge_index"]
     sender = edge_index[0]
@@ -235,9 +235,10 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
         e_attr = torch.cat([d, d_norm, dU, dU_norm], dim=1)
 
         #Computes the target accelerations for the current timestep using finite difference on the CLEAN positions.
-        accel = clean_positions[t + 1] - 2.0 * clean_positions[t] + clean_positions[t - 1]
+        accel_clean = clean_positions[t + 1] - 2.0 * clean_positions[t] + clean_positions[t - 1]
+        accel_corrected = accel_clean - noise[t-1]
 
-        samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=accel))
+        samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=accel_corrected))
 
     return samples
 
@@ -329,7 +330,7 @@ def rotate_batch(batch):
 #Will be recorded, and then the true positions of the next K steps in the chain will be recorded as the target.
 def _build_chain_samples(traj, Wall, h, K, noise_scale=3e-4):
     clean_positions = traj["positions"]
-    noisy_positions = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
+    noisy_positions, noise = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
 
     T = clean_positions.shape[0]
     samples = []
@@ -338,11 +339,13 @@ def _build_chain_samples(traj, Wall, h, K, noise_scale=3e-4):
         history_positions = noisy_positions[t-h : t+1]   # (h+1, N, 3) — model input
         clean_history     = clean_positions[t-h : t+1]   # (h+1, N, 3) — for true accel targets
         target_positions  = clean_positions[t+1 : t+1+K] # (K, N, 3) — clean
+        noise_at_input    = noise[t-1]
 
         samples.append({
             "history_positions": history_positions,
             "clean_history":     clean_history,
             "target_positions":  target_positions,
+            "noise_at_input":    noise_at_input,
             "edge_index":  traj["edge_index"],
             "nodes_body":  traj["nodes_body"],
             "wind_vector": traj["wind_vector"],
@@ -360,6 +363,7 @@ def _collate_chain_batch(chain_samples):
     targets       = torch.stack([s["target_positions"]  for s in chain_samples], dim=0)
     wind          = torch.stack([s["wind_vector"]       for s in chain_samples], dim=0)
     nodes_body    = torch.stack([s["nodes_body"]        for s in chain_samples], dim=0)
+    noise_at_input = torch.stack([s["noise_at_input"]   for s in chain_samples], dim=0)  # (B, N, 3)
 
     edge_index_single = chain_samples[0]["edge_index"]
     edge_index_batched = torch.cat([edge_index_single + b * N for b in range(B)], dim=1)
@@ -369,6 +373,7 @@ def _collate_chain_batch(chain_samples):
         "targets": targets, "wind": wind, "nodes_body": nodes_body,
         "edge_index": edge_index_batched,
         "B": B, "N": N, "E": E,
+        "noise_at_input": noise_at_input,
     }
 
 
@@ -420,6 +425,7 @@ def _unroll_chain_loss_accel(model, chain_batch, K, Wall, h,
     wind          = chain_batch["wind"]
     nodes_body    = chain_batch["nodes_body"]
     edge_index    = chain_batch["edge_index"]
+    noise_at_input = chain_batch["noise_at_input"]
     B, N = chain_batch["B"], chain_batch["N"]
 
     # Build one long clean trajectory: [clean[t-h], ..., clean[t], clean[t+1], ..., clean[t+K]]
@@ -445,6 +451,12 @@ def _unroll_chain_loss_accel(model, chain_batch, K, Wall, h,
                       - 2.0 * clean_full[:, h + k]
                       +       clean_full[:, h + k - 1])
         true_accel_norm = (true_accel.reshape(B * N, 3) - accel_mean) / accel_std
+
+        # Noise correction only at k=0 (inputs are noisy positions).
+        # For k >= 1, inputs are the model's own predictions and there's
+        # no random-walk noise to correct.
+        if k == 0:
+            true_accel = true_accel - noise_at_input
 
         step_losses.append(((pred_accel_norm - true_accel_norm) ** 2).mean())
 
@@ -495,6 +507,7 @@ def rotate_chain_batch(batch):
     batch["targets"]       = batch["targets"]       @ R.T
     batch["nodes_body"]    = batch["nodes_body"]    @ R.T
     batch["wind"]          = batch["wind"]          @ R.T
+    batch["noise_at_input"] = batch["noise_at_input"] @ R.T
     return batch
 
 
@@ -523,7 +536,8 @@ def train_gnn(Wall,
               epoch_checkpoint_interval=500,
               validation_check_interval=20,
               noise_scale=3e-4,
-              multistep = 1):
+              multistep = 1,
+              latent_dim = 128,):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -575,7 +589,7 @@ def train_gnn(Wall,
     #Compute normalization stats from one clean pass (no noise) over training trajectories.
     clean_samples = []
     for traj in dataset_train:
-        clean_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=0.0))
+        clean_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=noise_scale))
 
     x_mean, x_std = _compute_node_stats(clean_samples)
     e_mean, e_std = _compute_edge_stats(clean_samples)
@@ -612,7 +626,7 @@ def train_gnn(Wall,
 
     #Initializes the GNS model, which consists of an encoder for the node features, an encoder for the edge features, 
     #multiple GNS layers for message passing,
-    model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K = repeat_blocks).to(device)
+    model = GNSModel(node_dim, edge_dim, latent_dim=latent_dim, L=message_passing_layers, K = repeat_blocks).to(device)
 
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
