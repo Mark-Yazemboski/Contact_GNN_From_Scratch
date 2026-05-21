@@ -7,6 +7,8 @@ import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from generate_node_states import get_clean_positions, add_random_walk_noise
+import time
+ 
 
 
 
@@ -190,11 +192,7 @@ def build_dataset(Wall, traj_range,
 #This function takes a raw trajectory dictionary, applies random-walk noise to the node positions, 
 #and returns a list of Data objects which include the node features, edge features, and target accelerations for each timestep.
 def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
-
-    #Extracts the clean positions of the nodes from the trajectory, applies random-walk noise to create noisy positions,
     clean_positions = traj["positions"]
-
-    #Adds random walk noise to the clean positions to create noisy positions,
     noisy_positions, noise = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
 
     edge_index = traj["edge_index"]
@@ -205,41 +203,51 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
     dU = nodes_body[sender] - nodes_body[receiver]
     dU_norm = torch.norm(dU, dim=1, keepdim=True)
 
+    wall_n = torch.as_tensor(Wall.normal, dtype=torch.float32)
+    wall_c = torch.as_tensor(Wall.center_position, dtype=torch.float32)
+    wind_vector = traj["wind_vector"]
+
     T = clean_positions.shape[0]
-    samples = []
+    N = noisy_positions.shape[1]
+    M = T - 1 - h  # number of timestep samples (matches range(h, T-1))
+    if M <= 0:
+        return []
 
-    #Runs through each timestep in the trajectory
-    for t in range(h, T - 1):
-        v_fd = []
+    # ---- Velocity history features (vectorized over t) ----
+    # Original: for t in [h, T-2], v_k = noisy[t-k] - noisy[t-k-1] for k in [0, h-1]
+    v_fd_list = []
+    for k in range(h):
+        v_k = noisy_positions[h-k : T-1-k] - noisy_positions[h-k-1 : T-2-k]  # (M, N, 3)
+        v_fd_list.append(v_k)
+    v_fd_all = torch.cat(v_fd_list, dim=-1)  # (M, N, 3h)
 
-        #Makes the position history for the current timestep by taking the difference between the noisy positions 
-        #at the current timestep and the previous h timesteps.
-        for k in range(h):
-            v_fd.append(noisy_positions[t - k] - noisy_positions[t - k - 1])
-        v_fd = torch.cat(v_fd, dim=1)
+    # ---- Wall distance (vectorized over t) ----
+    rel_pos = noisy_positions[h : T-1] - wall_c                        # (M, N, 3)
+    dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (M, N, 1)
 
-        #Finds the distance from each node to the wall by projecting the vector from the wall center to the node position onto 
-        #the wall normal vector.
-        wall_n = torch.tensor(Wall.normal, dtype=torch.float32)
-        wall_c = torch.tensor(Wall.center_position, dtype=torch.float32)
-        dist = torch.sum((noisy_positions[t] - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
-        wind_vector=traj["wind_vector"]
-        N = noisy_positions.shape[1]
-        wind_expanded = wind_vector.unsqueeze(0).expand(N, -1)  # [3] -> [N, 3]
-        x_node = torch.cat([v_fd, wind_expanded, dist], dim=1)
+    # ---- Wind broadcast ----
+    wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)       # (M, N, 3)
 
-        #Find the edge features for the current timestep by taking the difference between the noisy positions of the sender 
-        #and receiver nodes.
-        d = noisy_positions[t][sender] - noisy_positions[t][receiver]
-        d_norm = torch.norm(d, dim=1, keepdim=True)
-        e_attr = torch.cat([d, d_norm, dU, dU_norm], dim=1)
+    # ---- Node features ----
+    x_node_all = torch.cat([v_fd_all, wind_broadcast, dist_all], dim=-1)  # (M, N, 3h+4)
 
-        #Computes the target accelerations for the current timestep using finite difference on the CLEAN positions.
-        accel_clean = clean_positions[t + 1] - 2.0 * clean_positions[t] + clean_positions[t - 1]
-        accel_corrected = accel_clean - noise[t-1]
+    # ---- Edge features (vectorized over t) ----
+    pos_at_t = noisy_positions[h : T-1]                                # (M, N, 3)
+    d_all = pos_at_t[:, sender] - pos_at_t[:, receiver]                # (M, E, 3)
+    d_norm_all = torch.norm(d_all, dim=-1, keepdim=True)               # (M, E, 1)
+    dU_broadcast = dU.unsqueeze(0).expand(M, -1, -1)
+    dU_norm_broadcast = dU_norm.unsqueeze(0).expand(M, -1, -1)
+    e_attr_all = torch.cat([d_all, d_norm_all, dU_broadcast, dU_norm_broadcast], dim=-1)  # (M, E, 8)
 
-        samples.append(Data(x=x_node, edge_index=edge_index, edge_attr=e_attr, y=accel_corrected))
+    # ---- Acceleration targets ----
+    accel_clean = clean_positions[h+1 : T] - 2.0 * clean_positions[h : T-1] + clean_positions[h-1 : T-2]
+    accel_corrected = accel_clean - noise[h-1 : T-2]                   # (M, N, 3)
 
+    # ---- Build Data objects (cheap now — just object construction) ----
+    samples = [
+        Data(x=x_node_all[i], edge_index=edge_index, edge_attr=e_attr_all[i], y=accel_corrected[i])
+        for i in range(M)
+    ]
     return samples
 
 #This function generates a random rotation matrix for rotating the data around the z-axis.
@@ -617,7 +625,8 @@ def train_gnn(Wall,
         val_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=0.0))
     _apply_input_normalization(val_samples, x_mean, x_std, e_mean, e_std)
     _apply_accel_normalization(val_samples, acc_mean, acc_std)
-    val_loader = DataLoader(val_samples, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_samples, batch_size=batch_size, shuffle=False,
+                        num_workers=4, pin_memory=True, persistent_workers=True)
 
     #Get input dimensions from one clean sample.
     sample_for_dims = _build_timestep_samples(dataset_train[0], Wall, h=h, noise_scale=0.0)[0]
@@ -726,7 +735,7 @@ def train_gnn(Wall,
     for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0.0
-
+        t0 = time.time()
         if multistep > 1:
             # Build fresh chain samples this epoch (fresh noise on history)
             chain_samples = []
@@ -737,6 +746,7 @@ def train_gnn(Wall,
             loader = torch.utils.data.DataLoader(
                 chain_samples, batch_size=batch_size, shuffle=True,
                 collate_fn=_collate_chain_batch,
+                num_workers=4, pin_memory=True,
             )
         else:
             # ...existing single-step path unchanged...
@@ -745,8 +755,9 @@ def train_gnn(Wall,
                 noisy_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=noise_scale))
             _apply_input_normalization(noisy_samples, x_mean, x_std, e_mean, e_std)
             _apply_accel_normalization(noisy_samples, acc_mean, acc_std)
-            loader = DataLoader(noisy_samples, batch_size=batch_size, shuffle=True)
-
+            loader = DataLoader(noisy_samples, batch_size=batch_size, shuffle=True,
+                    num_workers=4, pin_memory=True)
+        t1 = time.time()
         optimizer.zero_grad()
         effective_accumulation = min(accumulation_steps, len(loader))
 
@@ -779,7 +790,7 @@ def train_gnn(Wall,
         epoch_num = epoch + 1
         train_loss_epochs.append(epoch_num)
         train_loss_values.append(float(avg_train_loss))
-
+        t2 = time.time()
         if epoch % validation_check_interval == 0:
             # --- Validation ---
             model.eval()
@@ -825,6 +836,7 @@ def train_gnn(Wall,
         else:
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f}")
+        print(f"Epoch {epoch+1}: rebuild={t1-t0:.1f}s, train={t2-t1:.1f}s", flush=True)
             
         if (epoch + 1) % epoch_checkpoint_interval == 0:
             checkpoint_path = os.path.splitext(save_model_path)[0] + f"_epoch{epoch+1}.pt"

@@ -122,25 +122,19 @@ def quat_to_rotmat(q):
 #     return noisy_positions
 
 def add_random_walk_noise(positions, noise_scale=3e-4):
-    
-    velocities = positions[1:] - positions[:-1]
-
+    velocities = positions[1:] - positions[:-1]            # (T, N, 3)
     T, N, _ = velocities.shape
-    noise = torch.zeros(T, N, 3, device=positions.device)
 
+    # Generate all noise in one shot
+    noise = torch.randn(T, N, 3, device=positions.device) * noise_scale
 
+    # Add noise to velocities (vectorized)
+    noisy_velocities = velocities + noise
 
-    for t in range(T):
-        step_noise = torch.randn(N, 3, device=positions.device) * noise_scale
-        noise[t] = noise[t] + step_noise
-        velocities[t] = velocities[t] + noise[t]
-    
-    new_positions = torch.zeros_like(positions)
+    # Reconstruct positions: cumulative sum of noisy velocities + initial position
+    new_positions = torch.empty_like(positions)
     new_positions[0] = positions[0]
-    for t in range(1, T+1):
-        new_positions[t] = new_positions[t-1] + velocities[t-1]
-
-    
+    new_positions[1:] = positions[0:1] + torch.cumsum(noisy_velocities, dim=0)
 
     return new_positions, noise
 

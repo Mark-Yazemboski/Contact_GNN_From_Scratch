@@ -10,6 +10,18 @@ import random
 import os
 #This file is the same as run.py, except it has perameters specific to handel the wind data in the mojoco trajectories
 
+print(f"CUDA available: {torch.cuda.is_available()}", flush=True)
+print(f"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}", flush=True)
+print(f"Tensor device test: {torch.rand(3).cuda().device}", flush=True)
+
+# import torch_scatter
+# print(torch_scatter.__file__)
+# # Then test:
+# x = torch.randn(10, 4).cuda()
+# idx = torch.tensor([0,0,1,1,2,2,3,3,4,4]).cuda()
+# out = torch_scatter.scatter_add(x, idx, dim=0)
+# print(out.device)  # must say cuda:0
+
 
 #This function will take in the number of trajectories we are training on, and the 
 #number of optimizer steps we want to hit, and some other perameters, and calculate
@@ -149,7 +161,7 @@ extra_name = "" #CHANGE THIS----------------------------------------------------
 #------------------------------------------------------------------------------------------------------
 #This turns on and off model training, so you can train the model once, and then turn it off and just 
 #run the visualizations without having to retrain the model every time you run the code.
-Train = False
+Train = True
 #------------------------------------------------------------------------------------------------------
 
 #Model save/load settings.
@@ -158,7 +170,7 @@ save_model_path = os.path.join(script_dir, f"models/mojoco_pure_sliding_no_wind_
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
-rebuild_datasets = True
+rebuild_datasets = False
 
 #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
 resume_training_checkpoint_path = None
@@ -218,7 +230,7 @@ if Train:
         validation_check_interval = validation_check_interval,
         noise_scale = noise_scale,
         multistep=multistep,
-        latent_dim=128
+        latent_dim=128,
     )
 
 
