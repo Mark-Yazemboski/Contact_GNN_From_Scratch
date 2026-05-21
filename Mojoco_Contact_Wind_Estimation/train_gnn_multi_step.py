@@ -770,35 +770,35 @@ def train_gnn(Wall,
                 # Move dict to device, rotate, unroll
                 batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
                 batch = rotate_chain_batch(batch)
-                torch.cuda.synchronize(); t1 = time.time()
+                torch.cuda.synchronize(); t12 = time.time()
                 loss = _unroll_chain_loss_accel(
                     model, batch, K=multistep, Wall=Wall, h=h,
                     x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
                     accel_mean=acc_mean_gpu, accel_std=acc_std_gpu,
                 )
-                torch.cuda.synchronize(); t2 = time.time()
+                torch.cuda.synchronize(); t22 = time.time()
             else:
                 batch = batch.to(device)
                 batch = rotate_batch(batch)
-                torch.cuda.synchronize(); t1 = time.time()
+                torch.cuda.synchronize(); t12 = time.time()
                 pred_accel = model(batch)
                 loss = loss_fn(pred_accel, batch.y)
-                torch.cuda.synchronize(); t2 = time.time()
+                torch.cuda.synchronize(); t22 = time.time()
 
             scaled_loss = loss / effective_accumulation
             scaled_loss.backward()
-            torch.cuda.synchronize(); t3 = time.time()
+            torch.cuda.synchronize(); t32 = time.time()
 
             total_loss_tensor += loss.detach()
 
             if (i + 1) % effective_accumulation == 0 or (i + 1) == len(loader):
                 optimizer.step()
                 optimizer.zero_grad()
-            torch.cuda.synchronize(); t4 = time.time()
+            torch.cuda.synchronize(); t42 = time.time()
 
             if epoch == 1 and i < 5:
-                print(f"  batch {i}: to_gpu+rotate={t1-t0:.3f}s  fwd+loss={t2-t1:.3f}s  "
-                    f"bwd={t3-t2:.3f}s  opt={t4-t3:.3f}s  total={t4-t0:.3f}s", flush=True)
+                print(f"  batch {i}: to_gpu+rotate={t12-t0:.3f}s  fwd+loss={t22-t12:.3f}s  "
+                    f"bwd={t32-t22:.3f}s  opt={t42-t32:.3f}s  total={t42-t0:.3f}s", flush=True)
 
         #Averages loss over the epoch
         total_loss = total_loss_tensor.item()
