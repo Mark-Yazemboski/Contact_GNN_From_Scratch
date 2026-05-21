@@ -192,28 +192,30 @@ def build_dataset(Wall, traj_range,
 
 #This function takes a raw trajectory dictionary, applies random-walk noise to the node positions, 
 #and returns a list of Data objects which include the node features, edge features, and target accelerations for each timestep.
-def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
+def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4,
+                            x_mean=None, x_std=None, e_mean=None, e_std=None,
+                            acc_mean=None, acc_std=None):
     clean_positions = traj["positions"]
     noisy_positions, noise = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
-
+ 
     edge_index = traj["edge_index"]
     sender = edge_index[0]
     receiver = edge_index[1]
-
+ 
     nodes_body = traj["nodes_body"]
     dU = nodes_body[sender] - nodes_body[receiver]
     dU_norm = torch.norm(dU, dim=1, keepdim=True)
-
+ 
     wall_n = torch.as_tensor(Wall.normal, dtype=torch.float32)
     wall_c = torch.as_tensor(Wall.center_position, dtype=torch.float32)
     wind_vector = traj["wind_vector"]
-
+ 
     T = clean_positions.shape[0]
     N = noisy_positions.shape[1]
     M = T - 1 - h  # number of timestep samples (matches range(h, T-1))
     if M <= 0:
         return []
-
+ 
     # ---- Velocity history features (vectorized over t) ----
     # Original: for t in [h, T-2], v_k = noisy[t-k] - noisy[t-k-1] for k in [0, h-1]
     v_fd_list = []
@@ -221,17 +223,17 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
         v_k = noisy_positions[h-k : T-1-k] - noisy_positions[h-k-1 : T-2-k]  # (M, N, 3)
         v_fd_list.append(v_k)
     v_fd_all = torch.cat(v_fd_list, dim=-1)  # (M, N, 3h)
-
+ 
     # ---- Wall distance (vectorized over t) ----
     rel_pos = noisy_positions[h : T-1] - wall_c                        # (M, N, 3)
     dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (M, N, 1)
-
+ 
     # ---- Wind broadcast ----
     wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)       # (M, N, 3)
-
+ 
     # ---- Node features ----
     x_node_all = torch.cat([v_fd_all, wind_broadcast, dist_all], dim=-1)  # (M, N, 3h+4)
-
+ 
     # ---- Edge features (vectorized over t) ----
     pos_at_t = noisy_positions[h : T-1]                                # (M, N, 3)
     d_all = pos_at_t[:, sender] - pos_at_t[:, receiver]                # (M, E, 3)
@@ -239,17 +241,25 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4):
     dU_broadcast = dU.unsqueeze(0).expand(M, -1, -1)
     dU_norm_broadcast = dU_norm.unsqueeze(0).expand(M, -1, -1)
     e_attr_all = torch.cat([d_all, d_norm_all, dU_broadcast, dU_norm_broadcast], dim=-1)  # (M, E, 8)
-
+ 
     # ---- Acceleration targets ----
     accel_clean = clean_positions[h+1 : T] - 2.0 * clean_positions[h : T-1] + clean_positions[h-1 : T-2]
     accel_corrected = accel_clean - noise[h-1 : T-2]                   # (M, N, 3)
-
+ 
+    # ---- Apply normalization to batched tensors (folded in for speed) ----
+    if x_mean is not None:
+        x_node_all = (x_node_all - x_mean) / x_std
+        e_attr_all = (e_attr_all - e_mean) / e_std
+    if acc_mean is not None:
+        accel_corrected = (accel_corrected - acc_mean) / acc_std
+ 
     # ---- Build Data objects (cheap now — just object construction) ----
     samples = [
         Data(x=x_node_all[i], edge_index=edge_index, edge_attr=e_attr_all[i], y=accel_corrected[i])
         for i in range(M)
     ]
     return samples
+
 
 #This function generates a random rotation matrix for rotating the data around the z-axis.
 def random_z_rotation():
@@ -654,7 +664,14 @@ def train_gnn(Wall,
         checkpoint = torch.load(resume_checkpoint_path, map_location=device, weights_only=False)
 
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
+            ckpt_state = checkpoint["model_state_dict"]
+            # Strip or add _orig_mod prefix as needed for torch.compile compatibility
+            if any(k.startswith('_orig_mod.') for k in ckpt_state.keys()):
+                if not hasattr(model, '_orig_mod'):
+                    ckpt_state = {k.replace('_orig_mod.', '', 1): v for k, v in ckpt_state.items()}
+            elif hasattr(model, '_orig_mod'):
+                ckpt_state = {'_orig_mod.' + k: v for k, v in ckpt_state.items()}
+            model.load_state_dict(ckpt_state)
 
             if "optimizer_state_dict" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -700,6 +717,12 @@ def train_gnn(Wall,
             state_dict = loaded["model_state_dict"]
         else:
             state_dict = loaded
+
+        # Handle _orig_mod prefix from torch.compile
+        if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+            state_dict = {k.replace('_orig_mod.', '', 1): v for k, v in state_dict.items()}
+        elif hasattr(model, '_orig_mod'):
+            state_dict = {'_orig_mod.' + k: v for k, v in state_dict.items()}
 
         model.load_state_dict(state_dict)
         print("Weights loaded. Starting fresh: epoch=0, new optimizer, empty loss history.")
@@ -751,55 +774,57 @@ def train_gnn(Wall,
                 num_workers=4, pin_memory=True,
             )
         else:
-            # ...existing single-step path unchanged...
+            # Single-step path: rebuild noisy samples with fresh noise, normalization folded in
             noisy_samples = []
             for traj in dataset_train:
-                noisy_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=noise_scale))
-            _apply_input_normalization(noisy_samples, x_mean, x_std, e_mean, e_std)
-            _apply_accel_normalization(noisy_samples, acc_mean, acc_std)
+                noisy_samples.extend(_build_timestep_samples(
+                    traj, Wall, h=h, noise_scale=noise_scale,
+                    x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
+                    acc_mean=acc_mean, acc_std=acc_std,
+                ))
             loader = DataLoader(noisy_samples, batch_size=batch_size, shuffle=True,
                     num_workers=4, pin_memory=True)
         t1 = time.time()
         optimizer.zero_grad()
         effective_accumulation = min(accumulation_steps, len(loader))
-
+ 
         for i, batch in enumerate(loader):
-            torch.cuda.synchronize(); t0 = time.time()
-
+            torch.cuda.synchronize(); b0 = time.time()
+ 
             if multistep > 1:
                 # Move dict to device, rotate, unroll
                 batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
                 batch = rotate_chain_batch(batch)
-                torch.cuda.synchronize(); t12 = time.time()
+                torch.cuda.synchronize(); b1 = time.time()
                 loss = _unroll_chain_loss_accel(
                     model, batch, K=multistep, Wall=Wall, h=h,
                     x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
                     accel_mean=acc_mean_gpu, accel_std=acc_std_gpu,
                 )
-                torch.cuda.synchronize(); t22 = time.time()
+                torch.cuda.synchronize(); b2 = time.time()
             else:
                 batch = batch.to(device)
                 batch = rotate_batch(batch)
-                torch.cuda.synchronize(); t12 = time.time()
+                torch.cuda.synchronize(); b1 = time.time()
                 pred_accel = model(batch)
                 loss = loss_fn(pred_accel, batch.y)
-                torch.cuda.synchronize(); t22 = time.time()
-
+                torch.cuda.synchronize(); b2 = time.time()
+ 
             scaled_loss = loss / effective_accumulation
             scaled_loss.backward()
-            torch.cuda.synchronize(); t32 = time.time()
-
+            torch.cuda.synchronize(); b3 = time.time()
+ 
             total_loss_tensor += loss.detach()
-
+ 
             if (i + 1) % effective_accumulation == 0 or (i + 1) == len(loader):
                 optimizer.step()
                 optimizer.zero_grad()
-            torch.cuda.synchronize(); t42 = time.time()
-
+            torch.cuda.synchronize(); b4 = time.time()
+ 
             if epoch == 1 and i < 5:
-                print(f"  batch {i}: to_gpu+rotate={t12-t0:.3f}s  fwd+loss={t22-t12:.3f}s  "
-                    f"bwd={t32-t22:.3f}s  opt={t42-t32:.3f}s  total={t42-t0:.3f}s", flush=True)
-
+                print(f"  batch {i}: to_gpu+rotate={b1-b0:.3f}s  fwd+loss={b2-b1:.3f}s  "
+                    f"bwd={b3-b2:.3f}s  opt={b4-b3:.3f}s  total={b4-b0:.3f}s", flush=True)
+ 
         #Averages loss over the epoch
         total_loss = total_loss_tensor.item()
         avg_train_loss = total_loss / len(loader)
@@ -811,7 +836,7 @@ def train_gnn(Wall,
             # --- Validation ---
             model.eval()
             total_val_loss = 0.0
-
+ 
             with torch.no_grad():
                 for batch in val_loader:
                     batch = batch.to(device)
@@ -819,18 +844,18 @@ def train_gnn(Wall,
                     pred_accel = model(batch)
                     loss = loss_fn(pred_accel, batch.y)
                     total_val_loss += loss.item()
-
+ 
             avg_val_loss = total_val_loss / len(val_loader)
             val_loss_epochs.append(epoch_num)
             val_loss_values.append(float(avg_val_loss))
-
+ 
             if avg_val_loss < best_val_loss:
                 best_val_loss = float(avg_val_loss)
                 best_val_epoch = epoch_num
                 best_model_path = os.path.splitext(save_model_path)[0] + "_best_model.pt"
                 torch.save(model.state_dict(), best_model_path)
                 print(f"Best model saved to {best_model_path} at epoch {best_val_epoch}")
-
+ 
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f} | "
                 f"Val Loss: {avg_val_loss:.9f}")
