@@ -1,4 +1,5 @@
 import os
+from unittest import loader
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -636,7 +637,7 @@ def train_gnn(Wall,
     #Initializes the GNS model, which consists of an encoder for the node features, an encoder for the edge features, 
     #multiple GNS layers for message passing,
     model = GNSModel(node_dim, edge_dim, latent_dim=latent_dim, L=message_passing_layers, K = repeat_blocks).to(device)
-
+    model = torch.compile(model)
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -735,6 +736,7 @@ def train_gnn(Wall,
     for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0.0
+        total_loss_tensor = torch.zeros((), device=device)
         t0 = time.time()
         if multistep > 1:
             # Build fresh chain samples this epoch (fresh noise on history)
@@ -779,13 +781,14 @@ def train_gnn(Wall,
 
             scaled_loss = loss / effective_accumulation
             scaled_loss.backward()
-            total_loss += loss.item()
+            total_loss_tensor += loss.detach()
 
             if (i + 1) % effective_accumulation == 0 or (i + 1) == len(loader):
                 optimizer.step()
                 optimizer.zero_grad()
 
         #Averages loss over the epoch
+        total_loss = total_loss_tensor.item()
         avg_train_loss = total_loss / len(loader)
         epoch_num = epoch + 1
         train_loss_epochs.append(epoch_num)

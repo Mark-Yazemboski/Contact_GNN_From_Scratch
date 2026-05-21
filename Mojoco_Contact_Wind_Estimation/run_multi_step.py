@@ -8,8 +8,10 @@ import display_results
 import evaluate_metrics
 import random
 import os
-#This file is the same as run.py, except it has perameters specific to handel the wind data in the mojoco trajectories
 
+torch.set_float32_matmul_precision('high')
+
+#This file is the same as run.py, except it has perameters specific to handel the wind data in the mojoco trajectories
 print(f"CUDA available: {torch.cuda.is_available()}", flush=True)
 print(f"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}", flush=True)
 print(f"Tensor device test: {torch.rand(3).cuda().device}", flush=True)
