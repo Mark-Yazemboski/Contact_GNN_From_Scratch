@@ -275,11 +275,10 @@ print(f"Loading model from {load_model_path} for evaluation")
 #loads the model state dict from the specified path. The code checks if the loaded object
 #is a dictionary containing a "model_state_dict" key, which is a common format for saving 
 #checkpoints that include additional information like optimizer state and training epoch. 
-loaded_obj = torch.load(load_model_path, map_location=device, weights_only=False)
-if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
-    model.load_state_dict(loaded_obj["model_state_dict"])
-else:
-    model.load_state_dict(loaded_obj)
+loaded_obj = torch.load(load_model_path, map_location=device)
+if any(k.startswith('_orig_mod.') for k in loaded_obj.keys()):
+    loaded_obj = {k.replace('_orig_mod.', '', 1): v for k, v in loaded_obj.items()}
+model.load_state_dict(loaded_obj)
 
 #Moves the model to the GPU for faster computations.
 model.to(device)
