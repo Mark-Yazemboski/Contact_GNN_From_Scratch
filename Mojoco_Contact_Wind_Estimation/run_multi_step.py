@@ -99,7 +99,7 @@ message_passing_layers = 5
 repeat_blocks = 1
 
 #This is the batch size for training.
-batch_size=128
+batch_size=1024
 
 #This is the learning rate for training the GNN.
 learning_rate = 4e-4
@@ -135,7 +135,7 @@ unscale_trajectory_data = False
 #This will compute the number of epochs to train for based on the number of trajectories we
 # are using, the target number of optimizer steps, the batch size, and the accumulation steps.
 epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
-
+epochs = 10
 print("Training for {} epochs".format(epochs))
 
 #Sets how often the program will save a checkpoint of the model during training,
