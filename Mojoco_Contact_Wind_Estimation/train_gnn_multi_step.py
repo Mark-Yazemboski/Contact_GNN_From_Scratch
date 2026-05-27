@@ -8,6 +8,7 @@ import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from generate_node_states import get_clean_positions, add_random_walk_noise
+from fast_batch import build_epoch_tensors, iterate_batches, n_batches
 import time
  
 
@@ -773,22 +774,27 @@ def train_gnn(Wall,
                 collate_fn=_collate_chain_batch,
                 num_workers=4, pin_memory=True,
             )
+            num_batches = len(loader)
+            batch_iter = enumerate(loader)
         else:
-            # Single-step path: rebuild noisy samples with fresh noise, normalization folded in
-            noisy_samples = []
-            for traj in dataset_train:
-                noisy_samples.extend(_build_timestep_samples(
-                    traj, Wall, h=h, noise_scale=noise_scale,
-                    x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
-                    acc_mean=acc_mean, acc_std=acc_std,
-                ))
-            loader = DataLoader(noisy_samples, batch_size=batch_size, shuffle=True,
-                    num_workers=4, pin_memory=True)
+            # Single-step path: use fast_batch to skip PyG Data overhead.
+            # Builds flat (total_M, N, F) tensors once and gathers slices per batch.
+            epoch_data = build_epoch_tensors(
+                dataset_train, Wall, h=h, noise_scale=noise_scale,
+                x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
+                acc_mean=acc_mean, acc_std=acc_std,
+            )
+            num_batches = n_batches(epoch_data, batch_size)
+            # Note: iterate_batches moves tensors to device internally, so the
+            # batch.to(device) call in the inner loop is a no-op (idempotent).
+            batch_iter = enumerate(iterate_batches(
+                epoch_data, batch_size=batch_size, shuffle=True, device=device,
+            ))
         t1 = time.time()
         optimizer.zero_grad()
-        effective_accumulation = min(accumulation_steps, len(loader))
+        effective_accumulation = min(accumulation_steps, num_batches)
  
-        for i, batch in enumerate(loader):
+        for i, batch in batch_iter:
             torch.cuda.synchronize(); b0 = time.time()
  
             if multistep > 1:
@@ -803,7 +809,6 @@ def train_gnn(Wall,
                 )
                 torch.cuda.synchronize(); b2 = time.time()
             else:
-                batch = batch.to(device)
                 batch = rotate_batch(batch)
                 torch.cuda.synchronize(); b1 = time.time()
                 pred_accel = model(batch)
@@ -816,7 +821,7 @@ def train_gnn(Wall,
  
             total_loss_tensor += loss.detach()
  
-            if (i + 1) % effective_accumulation == 0 or (i + 1) == len(loader):
+            if (i + 1) % effective_accumulation == 0 or (i + 1) == num_batches:
                 optimizer.step()
                 optimizer.zero_grad()
             torch.cuda.synchronize(); b4 = time.time()
@@ -827,7 +832,7 @@ def train_gnn(Wall,
  
         #Averages loss over the epoch
         total_loss = total_loss_tensor.item()
-        avg_train_loss = total_loss / len(loader)
+        avg_train_loss = total_loss / num_batches
         epoch_num = epoch + 1
         train_loss_epochs.append(epoch_num)
         train_loss_values.append(float(avg_train_loss))
@@ -900,6 +905,7 @@ def train_gnn(Wall,
                 checkpoint_path,
             )
             print(f"Checkpoint saved to {checkpoint_path}")
+
 
 
     #Saves the trained model

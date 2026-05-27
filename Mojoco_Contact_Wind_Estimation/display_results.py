@@ -6,7 +6,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import animation
 import torch_geometric
 from generate_node_states import get_gns_features, knn_adjacency
-from train_gnn import GNSModel 
+from train_gnn_multi_step import GNSModel 
 
 #This file contains functions for visualizing the results of the GNN model's predictions 
 
