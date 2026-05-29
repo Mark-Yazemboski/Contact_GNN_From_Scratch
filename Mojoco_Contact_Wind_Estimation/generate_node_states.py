@@ -164,8 +164,12 @@ def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=
         R = quat_to_rotmat(state[3:7])
         all_positions.append((R @ nodes_body.T).T + state[:3])
 
-    wind_vector = data[1]
-    mass = data[2]
+    try:
+        wind_vector = data[1]
+        mass = data[2]
+    except:
+        wind_vector = torch.zeros(3)
+        print("Warning: Wind vector or mass not found in data file. Setting wind vector to zero and mass to 1.")
 
     return torch.stack(all_positions), edge_index, nodes_body, wind_vector
 
@@ -181,7 +185,11 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
     data_path = os.path.join(data_folder, f"{throw_number}.pt")
     data = torch.load(data_path, weights_only=weights_only)
     states = data[0].float()
-    wind_vector = data[1]
+    try:
+        wind_vector = data[1]
+    except:
+        wind_vector = torch.zeros(3)
+        print("Warning: Wind vector not found in data file. Setting wind vector to zero.")
     if unscale_data:
         unscaled_states = unscale_position_velocity(states)
     else:

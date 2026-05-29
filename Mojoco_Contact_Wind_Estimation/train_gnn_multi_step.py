@@ -1,5 +1,4 @@
 import os
-from unittest import loader
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,6 +9,13 @@ from torch_geometric.loader import DataLoader
 from generate_node_states import get_clean_positions, add_random_walk_noise
 from fast_batch import build_epoch_tensors, iterate_batches, n_batches
 import time
+
+def _triton_available():
+    try:
+        import triton  # noqa: F401
+        return True
+    except Exception:
+        return False
  
 
 
@@ -623,9 +629,6 @@ def train_gnn(Wall,
 
     print(f"Saved normalization stats to {norm_stats_path}")
 
-    x_mean, x_std = x_mean, x_std
-    e_mean, e_std = e_mean, e_std
-    acc_mean, acc_std = acc_mean, acc_std
 
     x_mean_gpu = x_mean.to(device); x_std_gpu = x_std.to(device)
     e_mean_gpu = e_mean.to(device); e_std_gpu = e_std.to(device)
@@ -648,7 +651,11 @@ def train_gnn(Wall,
     #Initializes the GNS model, which consists of an encoder for the node features, an encoder for the edge features, 
     #multiple GNS layers for message passing,
     model = GNSModel(node_dim, edge_dim, latent_dim=latent_dim, L=message_passing_layers, K = repeat_blocks).to(device)
-    model = torch.compile(model)
+    if torch.cuda.is_available() and _triton_available():
+        model = torch.compile(model)
+        print("torch.compile enabled.")
+    else:
+        print("torch.compile disabled (no CUDA/Triton) — running eager mode.")
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
