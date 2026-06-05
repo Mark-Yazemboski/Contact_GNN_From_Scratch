@@ -148,11 +148,11 @@ if __name__ == "__main__":
     #Meshed cube shows the initial node positions and edges. 
     #Augmentation shows the effect of random rotations on the trajectories. 
     #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
-    display_loss_curves = True
-    display_stats = False
+    display_loss_curves = False
+    display_stats = True
     show_meshed_cube = False
     show_augmentation = False
-    show_rollout = True
+    show_rollout = False
 
     #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     #---------------------------------------------------------------------------------------------------------
@@ -176,8 +176,8 @@ if __name__ == "__main__":
     rebuild_datasets = True
 
     #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
-    # resume_training_checkpoint_path = None
-    resume_training_checkpoint_path = os.path.join(script_dir, f"models/paper_traj_256/{Used_Num_train_trajectories}_train_gns_model_epoch500.pt")
+    resume_training_checkpoint_path = None
+    # resume_training_checkpoint_path = os.path.join(script_dir, f"models/paper_traj_256/{Used_Num_train_trajectories}_train_gns_model_epoch500.pt")
 
     #This will just load the model weights from the model location, but will not load the optimizer state or training epoch information.
     #This is useful if we want to use the initialization from a pretrained model, but we want to train it with different training 
