@@ -37,7 +37,7 @@ class FastBatch:
 
 def build_epoch_tensors(dataset_train, Wall, h, noise_scale=3e-4,
                         x_mean=None, x_std=None, e_mean=None, e_std=None,
-                        acc_mean=None, acc_std=None):
+                        acc_mean=None, acc_std=None, use_wind=False):
     """
     Build all features for one training epoch as flat stacked tensors.
     Same math as _build_timestep_samples — just produces tensors instead of Data objects.
@@ -92,7 +92,11 @@ def build_epoch_tensors(dataset_train, Wall, h, noise_scale=3e-4,
         wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)
 
         # ---- Node features ----
-        x_node_all = torch.cat([v_fd_all, wind_broadcast, dist_all], dim=-1)  # (M, N, 3h+4)
+        node_parts = [v_fd_all]
+        if use_wind:
+            node_parts.append(wind_vector.view(1, 1, -1).expand(M, N, -1))
+        node_parts.append(dist_all)
+        x_node_all = torch.cat(node_parts, dim=-1)
 
         # ---- Edge features ----
         pos_at_t = noisy_positions[h : T-1]

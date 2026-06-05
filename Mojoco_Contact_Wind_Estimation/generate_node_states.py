@@ -101,25 +101,6 @@ def quat_to_rotmat(q):
 
     return R
 
-# #This function adds random walk noise to the positions of the nodes over time, which can be used to ensure the model 
-# #is robust to small perturbations in the trajectories during training. The noise is added cumulatively over time, 
-# #creating a random walk effect.
-# def add_random_walk_noise(positions, noise_scale=3e-4):
-    
-#     #Creates a copy of the input positions to avoid modifying the original tensor, and initializes a 
-#     #noise tensor to accumulate the random walk noise over time.
-#     noisy_positions = positions.clone()
-#     T, N, _ = positions.shape
-#     noise = torch.zeros(N, 3, device=positions.device)
-
-#     #For each timestep, random noise is generated and added to the cumulative noise. 
-#     #This cumulative noise is then added to the positions for that timestep, creating a random walk effect over time.
-#     for t in range(T):
-#         step_noise = torch.randn(N, 3, device=positions.device) * noise_scale
-#         noise = noise + step_noise
-#         noisy_positions[t] = noisy_positions[t] + noise
-
-#     return noisy_positions
 
 def add_random_walk_noise(positions, noise_scale=3e-4):
     velocities = positions[1:] - positions[:-1]            # (T, N, 3)
@@ -178,7 +159,7 @@ def get_clean_positions(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=
 #include the relative position between connected nodes, the undeformed edge displacement, and their norms. The function returns
 #the node features, edge features, edge indices, and the true positions of the nodes for each timestep, which can be used for 
 #training the GNN model.
-def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, h=2, training=False, data_folder="data/tosses_processed", weights_only=True, unscale_data=True):
+def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, h=2, training=False, data_folder="data/tosses_processed", weights_only=True, unscale_data=True, use_wind = False):
 
     #This is the data path for the raw trajectories from the paper. The function loads the data for the specified throw number, 
     #unscales the position and velocity data back to SI units,
@@ -266,8 +247,11 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
 
         #Adds the distance to the wall as an additional feature to the velocity features for each node, 
         #creating the final node features for the current timestep.
-        wind_expanded = wind_vector.unsqueeze(0).expand(len(all_positions[t]), -1) 
-        node_feat = torch.cat([v_fd,wind_expanded, dist], dim=1)  
+        node_parts = [v_fd]
+        if use_wind:
+            node_parts.append(wind_vector.unsqueeze(0).expand(len(all_positions[t]), -1))
+        node_parts.append(dist)
+        node_feat = torch.cat(node_parts, dim=1)
         node_features.append(node_feat)
 
         #For each edge, the function computes the relative position d between the sender and receiver nodes, 

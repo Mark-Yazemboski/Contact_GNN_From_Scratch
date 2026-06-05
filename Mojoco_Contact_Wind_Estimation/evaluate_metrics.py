@@ -107,7 +107,7 @@ def compute_metrics(pred_positions, true_positions, rest_positions):
 def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, nodes_per_edge,
                    nearest_neighbors,
                    rest_positions, accel_std, accel_mean,
-                   x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,h):
+                   x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,h, use_wind = False):
     
 
     all_center_errors = []

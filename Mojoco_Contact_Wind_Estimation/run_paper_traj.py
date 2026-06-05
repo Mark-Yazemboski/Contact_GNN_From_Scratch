@@ -125,7 +125,7 @@ if __name__ == "__main__":
     #This is an important parameter that sets how many past positions the model can see when making
     #its predictions. Basically giving the model more past positions can give it information about
     #the velocity and acceleration of the nodes, which can help it make better predictions.
-    pos_history = 2
+    pos_history = 3
 
     #This is the number of steps to rollout the model during training for the multi-step loss.
     multistep = 1
@@ -175,7 +175,7 @@ if __name__ == "__main__":
 
     #Model save/load settings.
     # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-    save_model_path = os.path.join(script_dir, f"models/paper_traj_256/{Used_Num_train_trajectories}_train_gns_model.pt")
+    save_model_path = os.path.join(script_dir, f"models/paper_roll_val_3a_4/{Used_Num_train_trajectories}_train_gns_model.pt")
     print(f"Model checkpoints will be saved to: {save_model_path}")
 
     #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -195,7 +195,7 @@ if __name__ == "__main__":
     #Set this to a checkpoint file or model file to load for inference.
     #If None, the script will load the final model saved after training.
     # inference_model_path = None
-    inference_model_path = os.path.join(script_dir, f"models/paper_traj_256/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+    inference_model_path = os.path.join(script_dir, f"models/paper_roll_val_3a_4/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
     # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
@@ -240,8 +240,7 @@ if __name__ == "__main__":
             noise_scale = noise_scale,
             multistep=multistep,
             latent_dim=128,
-            use_rollout_validation = True,
-            nodes_body_for_rollout = nodes_body,
+            use_rollout_validation = True
         )
 
 

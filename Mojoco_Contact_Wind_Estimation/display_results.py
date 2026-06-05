@@ -90,7 +90,8 @@ def rollout_trajectory_feedback_shape_match(
     return_edge_info=False,
     weights_only_load=False,
     unscale_trajectory_data=False,
-    warn = True
+    warn = True,
+    use_wind=False
 ):
     
     #Loads the trajectory data for the specified throw number from the dataset, and extracts the wind vector
@@ -160,7 +161,7 @@ def rollout_trajectory_feedback_shape_match(
             recent, edge_index, rest_positions, Wall,
             x_mean=x_mean, x_std=x_std,
             e_mean=e_mean, e_std=e_std,
-            wind_vector=wind_vector
+            wind_vector=wind_vector, use_wind=use_wind
         )
 
         #Constructs a PyTorch Geometric Data object with the node features, edge indices, and edge features,
@@ -359,7 +360,7 @@ def animate_cube(
 #using the current predicted positions, the previous two predicted positions, the edge indices,
 #rest positions, wall information, and normalization statistics if provided.
 def _build_feedback_features(positions_history, edge_index, rest_positions, Wall,
-                             wind_vector=None, x_mean=None, x_std=None, e_mean=None, e_std=None):
+                             wind_vector=None, x_mean=None, x_std=None, e_mean=None, e_std=None, use_wind=False):
     # positions_history is a list of h+1 position tensors, most recent last
     x_t = positions_history[-1]
 
@@ -376,7 +377,11 @@ def _build_feedback_features(positions_history, edge_index, rest_positions, Wall
 
     N = x_t.shape[0]
     wind_expanded = wind_vector.unsqueeze(0).expand(N, -1).to(x_t.device)
-    x_node = torch.cat([v_fd, wind_expanded, b], dim=-1)
+    node_parts = [v_fd]
+    if use_wind:
+        node_parts.append(wind_vector.unsqueeze(0).expand(N, -1).to(x_t.device))
+    node_parts.append(b)
+    x_node = torch.cat(node_parts, dim=-1)
 
     src, dst = edge_index[0], edge_index[1]
     d = x_t[src] - x_t[dst]

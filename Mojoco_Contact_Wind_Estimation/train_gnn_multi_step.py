@@ -186,7 +186,7 @@ def _shape_match_batched(pred, rest, alpha=1.0):
 
 def _rollout_validation_batched(model, val_trajs, Wall, h,
                                 x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
-                                device, do_shape_match=True):
+                                device, do_shape_match=True, use_wind=False):
     """
     Batched rollout validation, faithful for VARIABLE-LENGTH trajectories.
     Pads every trajectory to the max length and rolls them all forward in lockstep,
@@ -231,7 +231,7 @@ def _rollout_validation_batched(model, val_trajs, Wall, h,
         for _ in range(h, L_max - 1):
             x_node, e_attr = _build_features_for_unroll(
                 pos_window, edge_index_b, nodes_body, Wall, wind,
-                x_mean, x_std, e_mean, e_std, B, N,
+                x_mean, x_std, e_mean, e_std, B, N, use_wind=use_wind
             )
             data = Data(x=x_node, edge_index=edge_index_b, edge_attr=e_attr)
             a = (model(data) * acc_std + acc_mean).reshape(B, N, 3)
@@ -252,47 +252,6 @@ def _rollout_validation_batched(model, val_trajs, Wall, h,
         angle_errors.append(m['angle_error_deg'])
     return float(np.mean(center_errors)), float(np.mean(angle_errors))
     
-
-def _rollout_validation(model, Wall, val_indices, rest_positions,
-                        trajectory_folder, nodes_per_edge, nearest_neighbors, h,
-                        x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
-                        weights_only, unscale_data):
-    """
-    Closed-loop rollout validation. Rolls the model out on each trajectory in
-    val_indices, computes the trajectory-averaged center/angle error (the paper's
-    metric), and returns the mean across trajectories. Lower center error is better.
-
-    Imports are deferred to avoid a circular import: display_results imports
-    GNSModel from this module, so importing it at module top would deadlock.
-    """
-    from display_results import rollout_trajectory_feedback_shape_match
-    from evaluate_metrics import compute_metrics
-
-    model.eval()
-    center_errors, angle_errors = [], []
-    with torch.no_grad():
-        for throw_number in val_indices:
-            pred_positions, true_positions, _ = rollout_trajectory_feedback_shape_match(
-                trajectory_folder, model, Wall,
-                throw_number=throw_number,
-                nodes_per_edge=nodes_per_edge,
-                nearest_neighbors=nearest_neighbors,
-                h=h,
-                rest_positions=rest_positions,
-                accel_std=acc_std, accel_mean=acc_mean,
-                x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
-                do_shape_match=True, shape_alpha=1.0,
-                return_edge_info=True,
-                weights_only_load=weights_only,
-                unscale_trajectory_data=unscale_data,
-                warn = False
-            )
-            print(f"Rollout validation for trajectory {throw_number} complete.")
-            m = compute_metrics(pred_positions, true_positions, rest_positions)
-            center_errors.append(m['center_error'])
-            angle_errors.append(m['angle_error_deg'])
-
-    return float(np.mean(center_errors)), float(np.mean(angle_errors))
 
 
 #This function builds a dataset from a range of trajectories. It processes each trajectory to extract the graph 
@@ -327,7 +286,7 @@ def build_dataset(Wall, traj_range,
 #and returns a list of Data objects which include the node features, edge features, and target accelerations for each timestep.
 def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4,
                             x_mean=None, x_std=None, e_mean=None, e_std=None,
-                            acc_mean=None, acc_std=None):
+                            acc_mean=None, acc_std=None, use_wind=False):
     clean_positions = traj["positions"]
     noisy_positions, noise = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
  
@@ -365,7 +324,11 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4,
     wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)       # (M, N, 3)
  
     # ---- Node features ----
-    x_node_all = torch.cat([v_fd_all, wind_broadcast, dist_all], dim=-1)  # (M, N, 3h+4)
+    node_parts = [v_fd_all]
+    if use_wind:
+        node_parts.append(wind_vector.view(1, 1, -1).expand(M, N, -1))
+    node_parts.append(dist_all)
+    x_node_all = torch.cat(node_parts, dim=-1)
  
     # ---- Edge features (vectorized over t) ----
     pos_at_t = noisy_positions[h : T-1]                                # (M, N, 3)
@@ -530,7 +493,7 @@ def _collate_chain_batch(chain_samples):
 
 
 def _build_features_for_unroll(pos_window, edge_index, nodes_body, Wall, wind,
-                               x_mean, x_std, e_mean, e_std, B, N):
+                               x_mean, x_std, e_mean, e_std, B, N, use_wind=False):
     """
     pos_window: list of h+1 tensors, each (B, N, 3), most recent last.
     Returns flat (B*N, node_dim) and (B*E, edge_dim) ready for the model.
@@ -549,7 +512,11 @@ def _build_features_for_unroll(pos_window, edge_index, nodes_body, Wall, wind,
     dist = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (B, N, 1)
 
     wind_expanded = wind.unsqueeze(1).expand(-1, N, -1)  # (B, N, 3)
-    x_node = torch.cat([v_fd, wind_expanded, dist], dim=-1).reshape(B * N, -1)
+    node_parts = [v_fd]
+    if use_wind:
+        node_parts.append(wind.unsqueeze(1).expand(-1, N, -1))
+    node_parts.append(dist)
+    x_node = torch.cat(node_parts, dim=-1).reshape(B * N, -1)
 
     # Edge features — operate on flattened positions so the offset edge_index works
     x_t_flat = x_t.reshape(B * N, 3)
@@ -569,88 +536,6 @@ def _build_features_for_unroll(pos_window, edge_index, nodes_body, Wall, wind,
     return x_node, e_attr
 
 
-def _unroll_chain_loss_accel(model, chain_batch, K, Wall, h,
-                             x_mean, x_std, e_mean, e_std, accel_mean, accel_std):
-    history       = chain_batch["history"]        # (B, h+1, N, 3) noisy — model input
-    clean_history = chain_batch["clean_history"]  # (B, h+1, N, 3) clean — for targets
-    targets       = chain_batch["targets"]        # (B, K, N, 3) clean
-    wind          = chain_batch["wind"]
-    nodes_body    = chain_batch["nodes_body"]
-    edge_index    = chain_batch["edge_index"]
-    noise_at_input = chain_batch["noise_at_input"]
-    B, N = chain_batch["B"], chain_batch["N"]
-
-    # Build one long clean trajectory: [clean[t-h], ..., clean[t], clean[t+1], ..., clean[t+K]]
-    # Index h is clean[t], index h+k+1 is clean[t+k+1].
-    clean_full = torch.cat([clean_history, targets], dim=1)  # (B, h+1+K, N, 3)
-
-    # Sliding window of positions used as model INPUT (mix of noisy and own predictions)
-    pos_window = [history[:, i] for i in range(h + 1)]
-
-    step_losses = []
-    for k in range(K):
-        x_node, e_attr = _build_features_for_unroll(
-            pos_window, edge_index, nodes_body, Wall, wind,
-            x_mean, x_std, e_mean, e_std, B, N,
-        )
-        data = Data(x=x_node, edge_index=edge_index, edge_attr=e_attr)
-        pred_accel_norm = model(data)
-
-        # TRUE accel at this physical timestep — same definition as single-step training.
-        # At unroll step k, model is predicting accel "for time t+k+1".
-        # true_accel = clean[t+k+1] - 2*clean[t+k] + clean[t+k-1]
-        true_accel = (clean_full[:, h + k + 1]
-                      - 2.0 * clean_full[:, h + k]
-                      +       clean_full[:, h + k - 1])
-        true_accel_norm = (true_accel.reshape(B * N, 3) - accel_mean) / accel_std
-
-        # Noise correction only at k=0 (inputs are noisy positions).
-        # For k >= 1, inputs are the model's own predictions and there's
-        # no random-walk noise to correct.
-        if k == 0:
-            true_accel = true_accel - noise_at_input
-
-        step_losses.append(((pred_accel_norm - true_accel_norm) ** 2).mean())
-
-        # Integrate using INPUT window (which has noise/predictions), not clean — this is what
-        # creates the compounding-error signal that multi-step loss actually trains on.
-        pred_accel = (pred_accel_norm * accel_std + accel_mean).reshape(B, N, 3)
-        pred_pos = pred_accel + 2.0 * pos_window[-1] - pos_window[-2]
-        pos_window = pos_window[1:] + [pred_pos]
-
-    return torch.stack(step_losses).mean()
-
-def _unroll_chain_loss_position(model, chain_batch, K, Wall, h,
-                                x_mean, x_std, e_mean, e_std, accel_mean, accel_std):
-    history    = chain_batch["history"]
-    targets    = chain_batch["targets"]    # (B, K, N, 3) clean
-    wind       = chain_batch["wind"]
-    nodes_body = chain_batch["nodes_body"]
-    edge_index = chain_batch["edge_index"]
-    B, N = chain_batch["B"], chain_batch["N"]
-
-    pos_window = [history[:, i] for i in range(h + 1)]
-
-    step_losses = []
-    for k in range(K):
-        x_node, e_attr = _build_features_for_unroll(
-            pos_window, edge_index, nodes_body, Wall, wind,
-            x_mean, x_std, e_mean, e_std, B, N,
-        )
-        data = Data(x=x_node, edge_index=edge_index, edge_attr=e_attr)
-        pred_accel_norm = model(data)
-
-        # Unnormalize accel and integrate to position
-        pred_accel = (pred_accel_norm * accel_std + accel_mean).reshape(B, N, 3)
-        pred_pos = pred_accel + 2.0 * pos_window[-1] - pos_window[-2]
-
-        # Position-space MSE against the clean target
-        position_loss = ((pred_pos - targets[:, k]) ** 2).mean()
-        step_losses.append(position_loss * 1e5)  # rough rescale to accel-loss range
-
-        pos_window = pos_window[1:] + [pred_pos]
-
-    return torch.stack(step_losses).mean()
 
 def rotate_chain_batch(batch):
     R = random_z_rotation().to(batch["history"].device)
@@ -691,7 +576,7 @@ def train_gnn(Wall,
               multistep = 1,
               latent_dim = 128,
               use_rollout_validation=False,
-              nodes_body_for_rollout = None,):
+              use_wind=False):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -743,7 +628,7 @@ def train_gnn(Wall,
     #Compute normalization stats from one clean pass (no noise) over training trajectories.
     clean_samples = []
     for traj in dataset_train:
-        clean_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=noise_scale))
+        clean_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=noise_scale, use_wind=use_wind))
 
     x_mean, x_std = _compute_node_stats(clean_samples)
     e_mean, e_std = _compute_edge_stats(clean_samples)
@@ -765,14 +650,14 @@ def train_gnn(Wall,
     #Build a clean validation sample set once (no training noise).
     val_samples = []
     for traj in dataset_val:
-        val_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=0.0))
+        val_samples.extend(_build_timestep_samples(traj, Wall, h=h, noise_scale=0.0, use_wind=use_wind))
     _apply_input_normalization(val_samples, x_mean, x_std, e_mean, e_std)
     _apply_accel_normalization(val_samples, acc_mean, acc_std)
     val_loader = DataLoader(val_samples, batch_size=batch_size, shuffle=False,
                         num_workers=4, pin_memory=True, persistent_workers=True)
 
     #Get input dimensions from one clean sample.
-    sample_for_dims = _build_timestep_samples(dataset_train[0], Wall, h=h, noise_scale=0.0)[0]
+    sample_for_dims = _build_timestep_samples(dataset_train[0], Wall, h=h, noise_scale=0.0, use_wind=use_wind)[0]
     node_dim = sample_for_dims.x.shape[1]
     edge_dim = sample_for_dims.edge_attr.shape[1]
 
@@ -901,25 +786,26 @@ def train_gnn(Wall,
         t0 = time.time()
         if multistep > 1:
             # Build fresh chain samples this epoch (fresh noise on history)
-            chain_samples = []
-            for traj in dataset_train:
-                chain_samples.extend(
-                    _build_chain_samples(traj, Wall, h=h, K=multistep, noise_scale=noise_scale)
-                )
-            loader = torch.utils.data.DataLoader(
-                chain_samples, batch_size=batch_size, shuffle=True,
-                collate_fn=_collate_chain_batch,
-                num_workers=4, pin_memory=True,
-            )
-            num_batches = len(loader)
-            batch_iter = enumerate(loader)
+            # chain_samples = []
+            # for traj in dataset_train:
+            #     chain_samples.extend(
+            #         _build_chain_samples(traj, Wall, h=h, K=multistep, noise_scale=noise_scale)
+            #     )
+            # loader = torch.utils.data.DataLoader(
+            #     chain_samples, batch_size=batch_size, shuffle=True,
+            #     collate_fn=_collate_chain_batch,
+            #     num_workers=4, pin_memory=True,
+            # )
+            # num_batches = len(loader)
+            # batch_iter = enumerate(loader)
+            print("multistep > 1: no longer supported in this version.  Please set multistep=1 for now.")
         else:
             # Single-step path: use fast_batch to skip PyG Data overhead.
             # Builds flat (total_M, N, F) tensors once and gathers slices per batch.
             epoch_data = build_epoch_tensors(
                 dataset_train, Wall, h=h, noise_scale=noise_scale,
                 x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
-                acc_mean=acc_mean, acc_std=acc_std,
+                acc_mean=acc_mean, acc_std=acc_std, use_wind=use_wind,
             )
             num_batches = n_batches(epoch_data, batch_size)
             # Note: iterate_batches moves tensors to device internally, so the
@@ -936,15 +822,16 @@ def train_gnn(Wall,
  
             if multistep > 1:
                 # Move dict to device, rotate, unroll
-                batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-                batch = rotate_chain_batch(batch)
-                torch.cuda.synchronize(); b1 = time.time()
-                loss = _unroll_chain_loss_accel(
-                    model, batch, K=multistep, Wall=Wall, h=h,
-                    x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
-                    accel_mean=acc_mean_gpu, accel_std=acc_std_gpu,
-                )
-                torch.cuda.synchronize(); b2 = time.time()
+                # batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                # batch = rotate_chain_batch(batch)
+                # torch.cuda.synchronize(); b1 = time.time()
+                # loss = _unroll_chain_loss_accel(
+                #     model, batch, K=multistep, Wall=Wall, h=h,
+                #     x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
+                #     accel_mean=acc_mean_gpu, accel_std=acc_std_gpu,
+                # )
+                # torch.cuda.synchronize(); b2 = time.time()
+                print("multistep > 1: no longer supported in this version.  Please set multistep=1 for now.")
             else:
                 batch = rotate_batch(batch)
                 torch.cuda.synchronize(); b1 = time.time()
@@ -996,7 +883,7 @@ def train_gnn(Wall,
                 rollout_center, rollout_angle = _rollout_validation_batched(
                     model, dataset_val, Wall, h,
                     x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
-                    device, do_shape_match=True,
+                    device, do_shape_match=True, use_wind=use_wind
                 )
 
                 
