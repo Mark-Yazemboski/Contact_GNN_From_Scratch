@@ -170,10 +170,10 @@ if __name__ == "__main__":
     #Model save/load settings.
     # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
     save_model_path = os.path.join(script_dir, f"models/paper_traj_256/{Used_Num_train_trajectories}_train_gns_model.pt")
-
+    print(f"Model checkpoints will be saved to: {save_model_path}")
 
     #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
-    rebuild_datasets = False
+    rebuild_datasets = True
 
     #Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
     # resume_training_checkpoint_path = None
