@@ -167,6 +167,132 @@ class GNSModel(nn.Module):
         decoded_state = self.decoder(x)
 
         return decoded_state
+    
+def _shape_match_batched(pred, rest, alpha=1.0):
+    """Batched uniform-mass shape_match. pred:(B,N,3) rest:(N,3). Mirrors shape_match()."""
+    x0_cm = rest.mean(dim=0)                                  # (3,)
+    x_cm  = pred.mean(dim=1, keepdim=True)                    # (B,1,3)
+    q = rest - x0_cm                                          # (N,3)
+    p = pred - x_cm                                           # (B,N,3)
+    Apq = torch.einsum('bni,nj->bij', p, q)                   # (B,3,3)
+    U, S, Vh = torch.linalg.svd(Apq)
+    d = torch.linalg.det(U @ Vh)                              # (B,)
+    D = torch.eye(3, device=pred.device, dtype=pred.dtype).expand(d.shape[0], 3, 3).clone()
+    D[:, 2, 2] = d
+    R = U @ D @ Vh                                            # (B,3,3)
+    g = torch.einsum('bij,nj->bni', R, q) + x_cm             # (B,N,3)
+    return pred + alpha * (g - pred)
+
+
+def _rollout_validation_batched(model, val_trajs, Wall, h,
+                                x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
+                                device, do_shape_match=True):
+    """
+    Batched rollout validation, faithful for VARIABLE-LENGTH trajectories.
+    Pads every trajectory to the max length and rolls them all forward in lockstep,
+    but scores each trajectory only over its own real frames -> matches the per-traj
+    rollout / evaluate_model. Padded frames are never scored and don't affect other
+    trajectories (block-diagonal graph).
+    """
+    from evaluate_metrics import compute_metrics  # deferred: avoids circular import
+
+    model.eval()
+    B = len(val_trajs)
+    N = val_trajs[0]["positions"].shape[1]
+
+    lengths = [t["positions"].shape[0] for t in val_trajs]      # real T_i per trajectory
+    T_max = max(lengths)
+
+    def _pad_to(p, T_max):
+        if p.shape[0] == T_max:
+            return p
+        tail = p[-1:].expand(T_max - p.shape[0], -1, -1)        # repeat last frame
+        return torch.cat([p, tail], dim=0)
+
+    clean = torch.stack([_pad_to(t["positions"], T_max) for t in val_trajs], dim=0).to(device)
+    wind  = torch.stack([t["wind_vector"] for t in val_trajs], dim=0).to(device)
+    nodes_body = torch.stack([t["nodes_body"] for t in val_trajs], dim=0).to(device)
+    rest_positions = val_trajs[0]["nodes_body"].to(device)
+
+    ei = val_trajs[0]["edge_index"].to(device)
+    edge_index_b = torch.cat([ei + b * N for b in range(B)], dim=1)
+
+    to_dev = lambda x: None if x is None else x.to(device)
+    x_mean, x_std, e_mean, e_std = map(to_dev, (x_mean, x_std, e_mean, e_std))
+    acc_mean, acc_std = to_dev(acc_mean), to_dev(acc_std)
+
+    true_from_h = clean[:, h:]                   # (B, L_max, N, 3), L_max = T_max - h
+    L_max = true_from_h.shape[1]
+
+    pos_window = [true_from_h[:, i] for i in range(h + 1)]
+    pred = [true_from_h[:, i].clone() for i in range(h + 1)]
+
+    with torch.no_grad():
+        for _ in range(h, L_max - 1):
+            x_node, e_attr = _build_features_for_unroll(
+                pos_window, edge_index_b, nodes_body, Wall, wind,
+                x_mean, x_std, e_mean, e_std, B, N,
+            )
+            data = Data(x=x_node, edge_index=edge_index_b, edge_attr=e_attr)
+            a = (model(data) * acc_std + acc_mean).reshape(B, N, 3)
+            x_next = a + 2.0 * pos_window[-1] - pos_window[-2]
+            if do_shape_match:
+                x_next = _shape_match_batched(x_next, rest_positions, alpha=1.0)
+            pred.append(x_next)
+            pos_window = pos_window[1:] + [x_next]
+
+    pred = torch.stack(pred, dim=1)              # (B, L_max, N, 3)
+
+    # Score each trajectory over ONLY its real frames (L_i = T_i - h).
+    center_errors, angle_errors = [], []
+    for b in range(B):
+        Lb = lengths[b] - h
+        m = compute_metrics(pred[b, :Lb], true_from_h[b, :Lb], rest_positions)
+        center_errors.append(m['center_error'])
+        angle_errors.append(m['angle_error_deg'])
+    return float(np.mean(center_errors)), float(np.mean(angle_errors))
+    
+
+def _rollout_validation(model, Wall, val_indices, rest_positions,
+                        trajectory_folder, nodes_per_edge, nearest_neighbors, h,
+                        x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
+                        weights_only, unscale_data):
+    """
+    Closed-loop rollout validation. Rolls the model out on each trajectory in
+    val_indices, computes the trajectory-averaged center/angle error (the paper's
+    metric), and returns the mean across trajectories. Lower center error is better.
+
+    Imports are deferred to avoid a circular import: display_results imports
+    GNSModel from this module, so importing it at module top would deadlock.
+    """
+    from display_results import rollout_trajectory_feedback_shape_match
+    from evaluate_metrics import compute_metrics
+
+    model.eval()
+    center_errors, angle_errors = [], []
+    with torch.no_grad():
+        for throw_number in val_indices:
+            pred_positions, true_positions, _ = rollout_trajectory_feedback_shape_match(
+                trajectory_folder, model, Wall,
+                throw_number=throw_number,
+                nodes_per_edge=nodes_per_edge,
+                nearest_neighbors=nearest_neighbors,
+                h=h,
+                rest_positions=rest_positions,
+                accel_std=acc_std, accel_mean=acc_mean,
+                x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
+                do_shape_match=True, shape_alpha=1.0,
+                return_edge_info=True,
+                weights_only_load=weights_only,
+                unscale_trajectory_data=unscale_data,
+                warn = False
+            )
+            print(f"Rollout validation for trajectory {throw_number} complete.")
+            m = compute_metrics(pred_positions, true_positions, rest_positions)
+            center_errors.append(m['center_error'])
+            angle_errors.append(m['angle_error_deg'])
+
+    return float(np.mean(center_errors)), float(np.mean(angle_errors))
 
 
 #This function builds a dataset from a range of trajectories. It processes each trajectory to extract the graph 
@@ -563,7 +689,9 @@ def train_gnn(Wall,
               validation_check_interval=20,
               noise_scale=3e-4,
               multistep = 1,
-              latent_dim = 128,):
+              latent_dim = 128,
+              use_rollout_validation=False,
+              nodes_body_for_rollout = None,):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -748,6 +876,7 @@ def train_gnn(Wall,
     val_loss_epochs = []
     val_loss_values = []
     best_val_loss = float("inf")
+    best_rollout_error = float("inf")
     best_val_epoch = None
 
     #If resuming and history exists in checkpoint, continue appending.
@@ -757,6 +886,7 @@ def train_gnn(Wall,
         val_loss_epochs = list(checkpoint.get("val_loss_epochs", val_loss_epochs))
         val_loss_values = list(checkpoint.get("val_loss_values", val_loss_values))
         best_val_loss = float(checkpoint.get("best_val_loss", best_val_loss))
+        best_rollout_error = float(checkpoint.get("best_rollout_error", best_rollout_error))
         best_val_epoch = checkpoint.get("best_val_epoch", best_val_epoch)
 
     print("Starting training...")
@@ -846,20 +976,36 @@ def train_gnn(Wall,
         t2 = time.time()
         if epoch % validation_check_interval == 0:
             # --- Validation ---
-            model.eval()
-            total_val_loss = 0.0
- 
-            with torch.no_grad():
-                for batch in val_loader:
-                    batch = batch.to(device)
-                    # No rotation augmentation at validation time
-                    pred_accel = model(batch)
-                    loss = loss_fn(pred_accel, batch.y)
-                    total_val_loss += loss.item()
- 
-            avg_val_loss = total_val_loss / len(val_loader)
+            if not use_rollout_validation:
+                model.eval()
+                total_val_loss = 0.0
+    
+                with torch.no_grad():
+                    for batch in val_loader:
+                        batch = batch.to(device)
+                        # No rotation augmentation at validation time
+                        pred_accel = model(batch)
+                        loss = loss_fn(pred_accel, batch.y)
+                        total_val_loss += loss.item()
+                
+    
+                avg_val_loss = total_val_loss / len(val_loader)
+
+            # --- Rollout validation (paper-faithful checkpoint selection) ---
+            if use_rollout_validation:
+                rollout_center, rollout_angle = _rollout_validation_batched(
+                    model, dataset_val, Wall, h,
+                    x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
+                    device, do_shape_match=True,
+                )
+
+                
+                avg_val_loss = rollout_center
+                print(f"  Rollout val | center: {rollout_center:.4f} | angle: {rollout_angle:.2f}")
+
             val_loss_epochs.append(epoch_num)
             val_loss_values.append(float(avg_val_loss))
+
  
             if avg_val_loss < best_val_loss:
                 best_val_loss = float(avg_val_loss)
@@ -871,7 +1017,8 @@ def train_gnn(Wall,
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f} | "
                 f"Val Loss: {avg_val_loss:.9f}")
-            
+            tval = time.time()
+            print("Validation time: {:.1f}s".format(tval - t2), flush=True)
             loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
             torch.save(
                 {
@@ -882,6 +1029,7 @@ def train_gnn(Wall,
                     "validation_check_interval": validation_check_interval,
                     "best_val_loss": best_val_loss,
                     "best_val_epoch": best_val_epoch,
+                    "best_rollout_error": best_rollout_error,
                 },
                 loss_history_path,
             )
@@ -908,6 +1056,7 @@ def train_gnn(Wall,
                     "val_loss_values": val_loss_values,
                     "best_val_loss": best_val_loss,
                     "best_val_epoch": best_val_epoch,
+                    "best_rollout_error": best_rollout_error,
                 },
                 checkpoint_path,
             )
@@ -931,6 +1080,7 @@ def train_gnn(Wall,
             "validation_check_interval": validation_check_interval,
             "best_val_loss": best_val_loss,
             "best_val_epoch": best_val_epoch,
+            "best_rollout_error": best_rollout_error,
         },
         loss_history_path,
     )

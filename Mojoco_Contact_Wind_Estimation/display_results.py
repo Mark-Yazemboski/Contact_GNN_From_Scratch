@@ -89,7 +89,8 @@ def rollout_trajectory_feedback_shape_match(
     shape_alpha=1.0,
     return_edge_info=False,
     weights_only_load=False,
-    unscale_trajectory_data=False
+    unscale_trajectory_data=False,
+    warn = True
 ):
     
     #Loads the trajectory data for the specified throw number from the dataset, and extracts the wind vector
@@ -98,7 +99,8 @@ def rollout_trajectory_feedback_shape_match(
         wind_vector = data[1]  
     except:
         wind_vector = torch.zeros(3)
-        print("Warning: Wind vector not found in data file. Setting wind vector to zero.")
+        if warn:
+            print("Warning: Wind vector not found in data file. Setting wind vector to zero.")
 
 
     #First generates the node features, edge features, edge indices, and true positions for the specified trajectory in the dataset.

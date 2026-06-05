@@ -92,6 +92,12 @@ if __name__ == "__main__":
     #Sets the number of nodes per edge. at 2 nodes per edge there is 8 nodes, each one at a corner of the cube.
     nodes_per_edge = 2
 
+    #This generates the initial node positions for the meshed cube, which are used for the visualizations.
+    nodes_body = torch.tensor(
+            generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
+            dtype=torch.float32
+        )
+
     #Sets the number of nearest neighbors to use for creating edges in the graph.
     K_nearest_neighbors = 3
 
@@ -234,6 +240,8 @@ if __name__ == "__main__":
             noise_scale = noise_scale,
             multistep=multistep,
             latent_dim=128,
+            use_rollout_validation = True,
+            nodes_body_for_rollout = nodes_body,
         )
 
 
@@ -254,11 +262,7 @@ if __name__ == "__main__":
     node_dim = node_feat.shape[2]
     edge_dim = edge_feat.shape[2]
 
-    #This generates the initial node positions for the meshed cube, which are used for the visualizations.
-    nodes_body = torch.tensor(
-            generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
-            dtype=torch.float32
-        )
+    
 
     #Loads the trained GNN model from the saved file, and sets it to evaluation mode. 
     #This model will be used for the rollouts and visualizations later in the code.
