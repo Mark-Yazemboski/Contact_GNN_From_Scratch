@@ -101,14 +101,14 @@ if __name__ == "__main__":
     repeat_blocks = 1
 
     #This is the batch size for training.
-    batch_size=256
+    batch_size=512
 
     #This is the learning rate for training the GNN.
     learning_rate = 1e-4
 
     #Noise scale for data augmentation. This is the standard deviation of the Gaussian noise added to the input positions
     # during training to help regularize the model and improve generalization.
-    noise_scale = 3e-4
+    noise_scale = 3e-4*BLOCK_HALF_WIDTH 
 
     #This is the total number of optimizer steps to train for. 
     steps = 1000000
@@ -119,7 +119,7 @@ if __name__ == "__main__":
     #This is an important parameter that sets how many past positions the model can see when making
     #its predictions. Basically giving the model more past positions can give it information about
     #the velocity and acceleration of the nodes, which can help it make better predictions.
-    pos_history = 3
+    pos_history = 2
 
     #This is the number of steps to rollout the model during training for the multi-step loss.
     multistep = 1

@@ -262,7 +262,7 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
         #the value between 0 and 0.5
         dist = Wall.get_distance_to_point(all_positions[t].numpy())
         dist = torch.tensor(dist, dtype=torch.float32).unsqueeze(1)
-        dist = torch.clamp(dist, 0.0, 0.5)
+        dist = torch.clamp(dist, 0.0, 0.5*BLOCK_HALF_WIDTH)
 
         #Adds the distance to the wall as an additional feature to the velocity features for each node, 
         #creating the final node features for the current timestep.
