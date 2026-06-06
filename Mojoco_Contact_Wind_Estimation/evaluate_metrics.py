@@ -137,7 +137,8 @@ def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, node
             return_edge_info=True,
             weights_only_load=weights_only_load,
             unscale_trajectory_data=unscale_trajectory_data,
-            h = h
+            h = h,
+            use_wind = use_wind,
         )
 
         #Computes the metrics for the current trajectory and appends them to the lists for averaging later.
