@@ -392,7 +392,8 @@ if show_rollout:
         return_edge_info=True,
         weights_only_load=weights_only_load,
         unscale_trajectory_data=unscale_trajectory_data,
-        h = pos_history
+        h = pos_history,
+        use_wind = use_wind_feature
         
     )  
     evaluate_metrics.compute_metrics(pred_positions, true_positions, nodes_body)
