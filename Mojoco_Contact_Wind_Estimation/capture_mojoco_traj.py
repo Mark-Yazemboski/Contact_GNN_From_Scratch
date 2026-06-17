@@ -70,11 +70,17 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
 
 #This function generates random initial conditions and parameters for the MuJoCo simulation, including a random wind vector,
 #initial position, orientation, velocity, and angular velocity of the cube, and returns them in a dictionary.
-def generate_toss_params(mass, wind_range, horizontal_pos_range, vertical_pos_range, horizontal_speed_range, vertical_speed_range, angvel_range):
-     
-    wind_dir = np.random.randn(3)
-    wind_dir[2] = 0
-    wind_dir = wind_dir / (np.linalg.norm(wind_dir) + 1e-8)
+def generate_toss_params(mass, wind_range, horizontal_pos_range, vertical_pos_range,
+                         horizontal_speed_range, vertical_speed_range, angvel_range,
+                         fix_wind_dir=False, wind_dir_fixed=(1.0, 0.0, 0.0),
+                         fix_toss_dir=False, toss_dir_fixed=(1.0, 0.0, 0.0)):
+    # --- wind ---
+    if fix_wind_dir:
+        wind_dir = np.array(wind_dir_fixed, dtype=float); wind_dir[2] = 0.0
+        wind_dir /= (np.linalg.norm(wind_dir) + 1e-8)
+    else:
+        wind_dir = np.random.randn(3); wind_dir[2] = 0
+        wind_dir /= (np.linalg.norm(wind_dir) + 1e-8)
     wind_vec = wind_dir * np.random.uniform(wind_range[0], wind_range[1])
 
     pos = np.array([
@@ -83,71 +89,70 @@ def generate_toss_params(mass, wind_range, horizontal_pos_range, vertical_pos_ra
         np.random.uniform(vertical_pos_range[0], vertical_pos_range[1]),
     ])
     quat = random_quat()
-    vel = np.array([
-        np.random.uniform(horizontal_speed_range[0], horizontal_speed_range[1]),
-        np.random.uniform(horizontal_speed_range[0], horizontal_speed_range[1]),
-        np.random.uniform(vertical_speed_range[0], vertical_speed_range[1]),
-    ])
+
+    # --- horizontal toss velocity ---
+    if fix_toss_dir:
+        d = np.array(toss_dir_fixed, dtype=float); d[2] = 0.0
+        d /= (np.linalg.norm(d) + 1e-8)
+        speed = np.random.uniform(0.0, abs(horizontal_speed_range[1]))   # magnitude only
+        vx, vy = speed * d[0], speed * d[1]
+    else:
+        vx = np.random.uniform(horizontal_speed_range[0], horizontal_speed_range[1])
+        vy = np.random.uniform(horizontal_speed_range[0], horizontal_speed_range[1])
+    vz = np.random.uniform(vertical_speed_range[0], vertical_speed_range[1])
+    vel = np.array([vx, vy, vz])
+
     angvel = np.random.uniform(angvel_range[0], angvel_range[1], size=3)
+    return {'wind': wind_vec, 'pos': pos, 'quat': quat, 'vel': vel,
+            'angvel': angvel, 'mass': mass, 'type': 'toss'}
 
-    return {
-        'wind': wind_vec,
-        'pos': pos,
-        'quat': quat,
-        'vel': vel,
-        'angvel': angvel,
-        'mass': mass,
-        'type': 'toss',
-    }
-
-def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_range, half_width=0.0524):
-
-    #Wind uses the same logic as toss trajectories
-    wind_dir = np.random.randn(3)
-    wind_dir[2] = 0
-    wind_dir = wind_dir / (np.linalg.norm(wind_dir) + 1e-8)
+def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_range,
+                            half_width=0.0524,
+                            fix_wind_dir=False, wind_dir_fixed=(1.0, 0.0, 0.0),
+                            fix_slide_dir=False, slide_dir_fixed=(1.0, 0.0, 0.0)):
+    # --- wind (same logic as toss) ---
+    if fix_wind_dir:
+        wind_dir = np.array(wind_dir_fixed, dtype=float); wind_dir[2] = 0.0
+        wind_dir /= (np.linalg.norm(wind_dir) + 1e-8)
+    else:
+        wind_dir = np.random.randn(3); wind_dir[2] = 0
+        wind_dir /= (np.linalg.norm(wind_dir) + 1e-8)
     wind_vec = wind_dir * np.random.uniform(wind_range[0], wind_range[1])
 
-    #Start sitting on the floor with random x/y position
     pos = np.array([
         np.random.uniform(-0.2, 0.2),
         np.random.uniform(-0.2, 0.2),
         half_width,
     ])
 
-    #Random rotation around z only so the cube sits flat on the floor
     theta = np.random.uniform(0, 2 * np.pi)
     quat = Rotation.from_euler('z', theta).as_quat(scalar_first=True)
 
-    #Horizontal velocity only — friction has to stop this
+    # --- horizontal slide velocity ---
     speed = np.random.uniform(sliding_speed_range[0], sliding_speed_range[1])
-    angle = np.random.uniform(0, 2 * np.pi)
-    vel = np.array([speed * np.cos(angle), speed * np.sin(angle), 0.0])
+    if fix_slide_dir:
+        d = np.array(slide_dir_fixed, dtype=float); d[2] = 0.0
+        d /= (np.linalg.norm(d) + 1e-8)
+        vel = np.array([speed * d[0], speed * d[1], 0.0])
+    else:
+        angle = np.random.uniform(0, 2 * np.pi)
+        vel = np.array([speed * np.cos(angle), speed * np.sin(angle), 0.0])
 
-    #Only spin around z axis so the cube doesn't tip over
     angvel = np.array([0.0, 0.0, np.random.uniform(angvel_z_range[0], angvel_z_range[1])])
-
-    return {
-        'wind': wind_vec,
-        'pos': pos,
-        'quat': quat,
-        'vel': vel,
-        'angvel': angvel,
-        'mass': mass,
-        'type': 'sliding',
-    }
+    return {'wind': wind_vec, 'pos': pos, 'quat': quat, 'vel': vel,
+            'angvel': angvel, 'mass': mass, 'type': 'sliding'}
 
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    save_dir = os.path.join(script_dir, "data", "mojoco_8192_wind_2.5_sliding20")
+    save_dir = os.path.join(script_dir, "data", "mojoco_Fixed_Wind_Throw_Direction_0_to_2.5_wind")
     os.makedirs(save_dir, exist_ok=True)
 
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
 
     #----- Dataset parameters -----
-    n_trajectories = 2048*4
+    n_trajectories = 2048
     n_steps = 200
     substeps = 50
     visualize_first = False
@@ -156,8 +161,13 @@ if __name__ == "__main__":
     sliding_percentage = .2
 
     #----- Shared parameters -----
-    wind_range = (2.5, 2.5)
+    wind_range = (0, 2.5)
     mass = 0.37
+
+    FIX_WIND_DIR = True
+    FIX_TOSS_DIR = True
+    WIND_DIR = (0.0, 1.0, 0.0)
+    TOSS_DIR = (1.0, 0.0, 0.0)
 
     #----- Toss-specific parameters -----
     toss_horizontal_pos_range = (-0.2, 0.2)
@@ -188,20 +198,22 @@ if __name__ == "__main__":
 
         if i in sliding_indices:
             params = generate_sliding_params(
-                mass=mass,
-                wind_range=wind_range,
+                mass=mass, wind_range=wind_range,
                 sliding_speed_range=sliding_speed_range,
                 angvel_z_range=sliding_angvel_z_range,
+                fix_wind_dir=FIX_WIND_DIR, wind_dir_fixed=WIND_DIR,
+                fix_slide_dir=FIX_TOSS_DIR, slide_dir_fixed=TOSS_DIR,   # or separate SLIDE_DIR flags
             )
         else:
             params = generate_toss_params(
-                mass=mass,
-                wind_range=wind_range,
+                mass=mass, wind_range=wind_range,
                 horizontal_pos_range=toss_horizontal_pos_range,
                 vertical_pos_range=toss_vertical_pos_range,
                 horizontal_speed_range=toss_horizontal_speed_range,
                 vertical_speed_range=toss_vertical_speed_range,
                 angvel_range=toss_angvel_range,
+                fix_wind_dir=FIX_WIND_DIR, wind_dir_fixed=WIND_DIR,
+                fix_toss_dir=FIX_TOSS_DIR, toss_dir_fixed=TOSS_DIR,
             )
 
         print(f"Trajectory {i} [{params['type']}]: wind={params['wind'].round(2)}, "
