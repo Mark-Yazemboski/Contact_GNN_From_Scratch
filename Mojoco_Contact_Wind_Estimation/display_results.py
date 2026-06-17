@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import animation
 import torch_geometric
-from generate_node_states import get_gns_features, knn_adjacency
+from generate_node_states import get_gns_features, knn_adjacency, relative_wind
 from train_gnn_multi_step import GNSModel 
 
 #This file contains functions for visualizing the results of the GNN model's predictions 
@@ -365,10 +365,11 @@ def _build_feedback_features(positions_history, edge_index, rest_positions, Wall
     x_t = positions_history[-1]
 
     # Build h velocity vectors via finite differences
-    v_fd = []
+    v_fd_list = []
     for k in range(len(positions_history) - 1):
-        v_fd.append(positions_history[-(k+1)] - positions_history[-(k+2)])
-    v_fd = torch.cat(v_fd, dim=-1)
+        v_fd_list.append(positions_history[-(k+1)] - positions_history[-(k+2)])
+    v_fd = torch.cat(v_fd_list, dim=-1)
+    v_curr = v_fd_list[0]                                   # (N, 3)
 
     if Wall is not None:
         wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
@@ -376,10 +377,10 @@ def _build_feedback_features(positions_history, edge_index, rest_positions, Wall
         b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
 
     N = x_t.shape[0]
-    wind_expanded = wind_vector.unsqueeze(0).expand(N, -1).to(x_t.device)
     node_parts = [v_fd]
     if use_wind:
-        node_parts.append(wind_vector.unsqueeze(0).expand(N, -1).to(x_t.device))
+        u, u_norm = relative_wind(wind_vector, v_curr)      # wind (3,) broadcasts to (N,3)
+        node_parts += [u, u_norm]
     node_parts.append(b)
     x_node = torch.cat(node_parts, dim=-1)
 

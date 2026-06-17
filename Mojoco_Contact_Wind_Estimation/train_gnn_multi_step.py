@@ -6,7 +6,7 @@ import random
 import numpy as np
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from generate_node_states import get_clean_positions, add_random_walk_noise
+from generate_node_states import get_clean_positions, add_random_walk_noise, relative_wind
 from fast_batch import build_epoch_tensors, iterate_batches, n_batches
 import time
 
@@ -320,13 +320,12 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4,
     rel_pos = noisy_positions[h : T-1] - wall_c                        # (M, N, 3)
     dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (M, N, 1)
  
-    # ---- Wind broadcast ----
-    wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)       # (M, N, 3)
- 
     # ---- Node features ----
+    v_curr = v_fd_list[0]
     node_parts = [v_fd_all]
     if use_wind:
-        node_parts.append(wind_vector.view(1, 1, -1).expand(M, N, -1))
+        u, u_norm = relative_wind(wind_vector.view(1, 1, 3), v_curr)
+        node_parts += [u, u_norm]
     node_parts.append(dist_all)
     x_node_all = torch.cat(node_parts, dim=-1)
  
@@ -372,124 +371,29 @@ def random_z_rotation():
     return R
 
 #This function applies a random rotation to the node features, edge features, and target accelerations in a batch of data.
-def rotate_batch(batch):
-    
-    #Gets the device of the input data
+def rotate_batch(batch, h, use_wind=False):
     device = batch.x.device
-
-    #Generates a random rotation matrix for rotating the data around the z-axis.
     R = random_z_rotation().to(device)
 
-    #Gets the length of the state vector. From this we can tell how many velocity history steps there are 
-    # (since we know the distance feature is always 1 dim and at the end), which allows us to correctly reshape 
-    # the velocity features for rotation. We also know there is a wind vector in the -4:-1 dims,
-    state_vector_length = len(batch.x[0])
+    # Node layout:
+    #   use_wind : [v_fd(3h), u(3), ||u||(1), dist(1)] -> (h+1) 3-vectors, 2 scalars
+    #   no wind  : [v_fd(3h),                 dist(1)] ->  h    3-vectors, 1 scalar
+    num_vec3 = (h + 1) if use_wind else h
+    vecs = batch.x[:, :num_vec3 * 3].view(-1, num_vec3, 3)
+    vecs = torch.matmul(vecs, R.T).view(-1, num_vec3 * 3)
+    scalars = batch.x[:, num_vec3 * 3:]                 # ||u||, dist (or just dist) — rotation-invariant
+    batch.x = torch.cat([vecs, scalars], dim=1)
 
-    #Calculates the number of velocity vectors in the node features by taking the total length of the state vector,
-    # subtracting 1 for the distance feature and 3 for the wind vector, and then dividing by 3 (the dimension of each velocity vector).
-    num_vel_vectors = (state_vector_length - 1 - 3) // 3
-
-
-    # ---- Rotate node features ----
-    # x contains [v_t, v_tm1, v_{t-2},..., wind_vector, dist]
-
-
-    #Extracts the velocity features, wind vector, and distance feature from the node features in batch.x
-    # based on the calculated number of velocity vectors.
-    v = batch.x[:, :num_vel_vectors*3] 
-    wind_vector = batch.x[:, num_vel_vectors*3:num_vel_vectors*3 + 3]
-    dist = batch.x[:, num_vel_vectors*3 + 3:num_vel_vectors*3 + 4]
-
-    #The velocity features are reshaped to separate the current and previous velocity vectors,
-    #then rotated using the random rotation matrix R, and finally reshaped back to the original format.
-    v = v.view(-1, num_vel_vectors, 3)
-    v = torch.matmul(v, R.T)
-    v = v.view(-1, num_vel_vectors * 3)
-
-    #Rotates the wind vector using the same random rotation matrix R to ensure consistency in the data augmentation.
-    wind_vector = wind_vector @ R.T
-
-    #The rotated velocity features are concatenated with the distance features to form the new node features, 
-    #which are then assigned back to batch.x.
-    batch.x = torch.cat([v, wind_vector, dist], dim=1)
-
-    # ---- Rotate edge features ----
-    # edge_attr = [d, d_norm, dU, dU_norm]
-
-    #Extracts the distance and relative velocity features from the edge attributes.
-    d = batch.edge_attr[:, 0:3]
-    d_norm = batch.edge_attr[:, 3:4]
-    dU = batch.edge_attr[:, 4:7]
+    # Edge features unchanged: [d(3), d_norm(1), dU(3), dU_norm(1)]
+    d       = batch.edge_attr[:, 0:3] @ R.T
+    d_norm  = batch.edge_attr[:, 3:4]
+    dU      = batch.edge_attr[:, 4:7] @ R.T
     dU_norm = batch.edge_attr[:, 7:8]
+    batch.edge_attr = torch.cat([d, d_norm, dU, dU_norm], dim=1)
 
-    #The distance and relative velocity features are rotated using the same random rotation matrix R.
-    d = d @ R.T
-    dU = dU @ R.T
-
-    #The rotated distance and relative velocity features are concatenated with the normalized distance and 
-    #relative velocity features
-    batch.edge_attr = torch.cat(
-        [d, d_norm, dU, dU_norm],
-        dim=1
-    )
-
-    #The target accelerations in batch.y are also rotated using the same random rotation matrix R.
     batch.y = batch.y @ R.T
-
-
-
     return batch
 
-
-#This function withh build all of the chains possible from a trajectory. The position history of the first position in the chain
-#Will be recorded, and then the true positions of the next K steps in the chain will be recorded as the target.
-def _build_chain_samples(traj, Wall, h, K, noise_scale=3e-4):
-    clean_positions = traj["positions"]
-    noisy_positions, noise = add_random_walk_noise(clean_positions, noise_scale=noise_scale)
-
-    T = clean_positions.shape[0]
-    samples = []
-
-    for t in range(h, T - K):
-        history_positions = noisy_positions[t-h : t+1]   # (h+1, N, 3) — model input
-        clean_history     = clean_positions[t-h : t+1]   # (h+1, N, 3) — for true accel targets
-        target_positions  = clean_positions[t+1 : t+1+K] # (K, N, 3) — clean
-        noise_at_input    = noise[t-1]
-
-        samples.append({
-            "history_positions": history_positions,
-            "clean_history":     clean_history,
-            "target_positions":  target_positions,
-            "noise_at_input":    noise_at_input,
-            "edge_index":  traj["edge_index"],
-            "nodes_body":  traj["nodes_body"],
-            "wind_vector": traj["wind_vector"],
-        })
-
-    return samples
-
-def _collate_chain_batch(chain_samples):
-    B = len(chain_samples)
-    N = chain_samples[0]["history_positions"].shape[1]
-    E = chain_samples[0]["edge_index"].shape[1]
-
-    history       = torch.stack([s["history_positions"] for s in chain_samples], dim=0)
-    clean_history = torch.stack([s["clean_history"]     for s in chain_samples], dim=0)  # NEW
-    targets       = torch.stack([s["target_positions"]  for s in chain_samples], dim=0)
-    wind          = torch.stack([s["wind_vector"]       for s in chain_samples], dim=0)
-    nodes_body    = torch.stack([s["nodes_body"]        for s in chain_samples], dim=0)
-    noise_at_input = torch.stack([s["noise_at_input"]   for s in chain_samples], dim=0)  # (B, N, 3)
-
-    edge_index_single = chain_samples[0]["edge_index"]
-    edge_index_batched = torch.cat([edge_index_single + b * N for b in range(B)], dim=1)
-
-    return {
-        "history": history, "clean_history": clean_history,    # NEW key
-        "targets": targets, "wind": wind, "nodes_body": nodes_body,
-        "edge_index": edge_index_batched,
-        "B": B, "N": N, "E": E,
-        "noise_at_input": noise_at_input,
-    }
 
 
 def _build_features_for_unroll(pos_window, edge_index, nodes_body, Wall, wind,
@@ -501,20 +405,21 @@ def _build_features_for_unroll(pos_window, edge_index, nodes_body, Wall, wind,
     device = pos_window[0].device
 
     # Velocity history via finite differences — same convention as get_gns_features
-    v_fd = []
+    v_fd_list = []
     for k in range(len(pos_window) - 1):
-        v_fd.append(pos_window[-(k+1)] - pos_window[-(k+2)])
-    v_fd = torch.cat(v_fd, dim=-1)  # (B, N, 3*h)
+        v_fd_list.append(pos_window[-(k+1)] - pos_window[-(k+2)])
+    v_fd = torch.cat(v_fd_list, dim=-1)
+    v_curr = v_fd_list[0]                                   # (B, N, 3)
 
     x_t = pos_window[-1]
     wall_n = torch.as_tensor(Wall.normal,           dtype=x_t.dtype, device=device)
     wall_c = torch.as_tensor(Wall.center_position,  dtype=x_t.dtype, device=device)
     dist = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (B, N, 1)
 
-    wind_expanded = wind.unsqueeze(1).expand(-1, N, -1)  # (B, N, 3)
     node_parts = [v_fd]
     if use_wind:
-        node_parts.append(wind.unsqueeze(1).expand(-1, N, -1))
+        u, u_norm = relative_wind(wind.unsqueeze(1), v_curr)   # (B,3)->(B,1,3) broadcasts
+        node_parts += [u, u_norm]
     node_parts.append(dist)
     x_node = torch.cat(node_parts, dim=-1).reshape(B * N, -1)
 
@@ -833,7 +738,7 @@ def train_gnn(Wall,
                 # torch.cuda.synchronize(); b2 = time.time()
                 print("multistep > 1: no longer supported in this version.  Please set multistep=1 for now.")
             else:
-                batch = rotate_batch(batch)
+                batch = rotate_batch(batch, h, use_wind)
                 torch.cuda.synchronize(); b1 = time.time()
                 pred_accel = model(batch)
                 loss = loss_fn(pred_accel, batch.y)

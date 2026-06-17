@@ -5,6 +5,17 @@ import numpy as np
 #The half width of the block used in the making of the dataset
 BLOCK_HALF_WIDTH = 0.0524
 
+#THIS NEEDS TO BE CHANGED WHEN WE MOVE AWAY FROM MOJOCO
+TIMESTEP = 0.0001348
+SUBSTEPS = 50
+DT_RECORD = TIMESTEP * SUBSTEPS  
+
+def relative_wind(wind_ms, v_curr):
+    """wind_ms (m/s) broadcastable to v_curr; v_curr is the most-recent FD velocity (m/step).
+       Returns (u, ||u||) in meters-per-recorded-step."""
+    u = wind_ms * DT_RECORD - v_curr
+    return u, torch.norm(u, dim=-1, keepdim=True)
+
 #takes in the raw data and converts it back to SI units using the conversion described in the paper
 def unscale_position_velocity(scaled_tensor):
     unscaled_tensor = scaled_tensor.clone()
@@ -229,30 +240,26 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
     #history steps used for the finite difference velocity features.
     for t in range(h, T):
 
-        v_fd = []
-
-        #Finds the current velocity and h previous velocities using finite differences over the history of positions, 
-        #and concatenates them to create the velocity features for the nodes at the current timestep.
+        v_fd_list = []
         for k in range(h):
-            v = (all_positions[t-k] - all_positions[t-k-1])
-            v_fd.append(v)
-
-        v_fd = torch.cat(v_fd, dim=1)  # (N, 3h)
+            v_fd_list.append(all_positions[t-k] - all_positions[t-k-1])
+        v_fd = torch.cat(v_fd_list, dim=1)
+        v_curr = v_fd_list[0]                                   # (N, 3)
 
         #Computes the distance from each node to the wall using the get_distance_to_point function of the Wall object, and clamps
         #the value between 0 and 0.5
         dist = Wall.get_distance_to_point(all_positions[t].numpy())
         dist = torch.tensor(dist, dtype=torch.float32).unsqueeze(1)
-        dist = torch.clamp(dist, 0.0, 0.5*BLOCK_HALF_WIDTH)
+        dist = torch.clamp(dist, 0.0, 0.5)
 
         #Adds the distance to the wall as an additional feature to the velocity features for each node, 
         #creating the final node features for the current timestep.
         node_parts = [v_fd]
         if use_wind:
-            node_parts.append(wind_vector.unsqueeze(0).expand(len(all_positions[t]), -1))
+            u, u_norm = relative_wind(wind_vector, v_curr)      # wind (3,) broadcasts to (N,3)
+            node_parts += [u, u_norm]
         node_parts.append(dist)
-        node_feat = torch.cat(node_parts, dim=1)
-        node_features.append(node_feat)
+        node_features = torch.cat(node_parts, dim=1)
 
         #For each edge, the function computes the relative position d between the sender and receiver nodes, 
         #as well as the norm of this relative position.

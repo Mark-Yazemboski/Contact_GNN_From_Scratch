@@ -20,7 +20,7 @@ Use:
 """
 
 import torch
-from generate_node_states import add_random_walk_noise
+from generate_node_states import add_random_walk_noise, relative_wind
 
 
 # ---- The tiny batch object that replaces PyG's Data/Batch ----
@@ -82,19 +82,19 @@ def build_epoch_tensors(dataset_train, Wall, h, noise_scale=3e-4,
         for k in range(h):
             v_k = noisy_positions[h-k : T-1-k] - noisy_positions[h-k-1 : T-2-k]  # (M, N, 3)
             v_fd_list.append(v_k)
-        v_fd_all = torch.cat(v_fd_list, dim=-1)  # (M, N, 3h)
+        v_fd_all = torch.cat(v_fd_list, dim=-1)
+        v_curr = v_fd_list[0]                                   # (M, N, 3), most recent velocity
 
         # ---- Wall distance ----
         rel_pos = noisy_positions[h : T-1] - wall_c
         dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
 
-        # ---- Wind broadcast ----
-        wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)
 
         # ---- Node features ----
         node_parts = [v_fd_all]
         if use_wind:
-            node_parts.append(wind_vector.view(1, 1, -1).expand(M, N, -1))
+            u, u_norm = relative_wind(wind_vector.view(1, 1, 3), v_curr)
+            node_parts += [u, u_norm]
         node_parts.append(dist_all)
         x_node_all = torch.cat(node_parts, dim=-1)
 

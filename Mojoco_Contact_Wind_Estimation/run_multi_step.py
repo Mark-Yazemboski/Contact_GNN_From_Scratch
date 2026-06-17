@@ -119,6 +119,8 @@ traj_timesteps = 200
 #the velocity and acceleration of the nodes, which can help it make better predictions.
 pos_history = 3
 
+Latent_dimension = 128
+
 #This is the number of steps to rollout the model during training for the multi-step loss.
 multistep = 1
 
@@ -172,7 +174,7 @@ Train = True
 
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/mojoco_fixed_everything_no_wind_feat/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(script_dir, f"models/Testing/{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -192,7 +194,7 @@ copy_weights_only_path = None
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
 # inference_model_path = None
-inference_model_path = os.path.join(script_dir, f"models/mojoco_fixed_everything_no_wind_feat/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = os.path.join(script_dir, f"models/Testing/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
@@ -236,7 +238,7 @@ if Train:
         validation_check_interval = validation_check_interval,
         noise_scale = noise_scale,
         multistep=multistep,
-        latent_dim=128,
+        latent_dim=Latent_dimension,
         use_rollout_validation = True,
         use_wind=use_wind_feature
     )
@@ -267,7 +269,7 @@ nodes_body = torch.tensor(
 
 #Loads the trained GNN model from the saved file, and sets it to evaluation mode. 
 #This model will be used for the rollouts and visualizations later in the code.
-model = GNSModel(node_dim, edge_dim, latent_dim=128, L=message_passing_layers, K=repeat_blocks)
+model = GNSModel(node_dim, edge_dim, latent_dim=Latent_dimension, L=message_passing_layers, K=repeat_blocks)
 
 #Checks to see if we specified a model to load for inference. If not, it 
 #loads the best model saved during training.
