@@ -141,22 +141,22 @@ def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_rang
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    save_dir = os.path.join(script_dir, "data", "mojoco_pure_sliding_2048_no_wind")
+    save_dir = os.path.join(script_dir, "data", "mojoco_8192_wind_2.5_sliding20")
     os.makedirs(save_dir, exist_ok=True)
 
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
 
     #----- Dataset parameters -----
-    n_trajectories = 2048
+    n_trajectories = 2048*4
     n_steps = 200
     substeps = 50
     visualize_first = False
 
     #What percentage of the total trajectories should be sliding-only (0.0 to 1.0)
-    sliding_percentage = 1
+    sliding_percentage = .2
 
     #----- Shared parameters -----
-    wind_range = (0, 0)
+    wind_range = (2.5, 2.5)
     mass = 0.37
 
     #----- Toss-specific parameters -----
