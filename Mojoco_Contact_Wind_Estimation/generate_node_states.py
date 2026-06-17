@@ -259,7 +259,8 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
             u, u_norm = relative_wind(wind_vector, v_curr)      # wind (3,) broadcasts to (N,3)
             node_parts += [u, u_norm]
         node_parts.append(dist)
-        node_features = torch.cat(node_parts, dim=1)
+        node_feat = torch.cat(node_parts, dim=1)   # temp, not the accumulator
+        node_features.append(node_feat)
 
         #For each edge, the function computes the relative position d between the sender and receiver nodes, 
         #as well as the norm of this relative position.
