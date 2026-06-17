@@ -15,6 +15,39 @@ from display_results import rollout_trajectory_feedback_shape_match
 BLOCK_HALF_WIDTH = 0.0524
 BLOCK_WIDTH = 2 * BLOCK_HALF_WIDTH
 
+# --- thresholds for phase segmentation ---
+CONTACT_Z_THRESH    = 0.2 * BLOCK_HALF_WIDTH   # lowest node within ~1cm of floor => in contact
+SETTLE_SPEED_THRESH = 0.01 * BLOCK_WIDTH       # per-step COM displacement below this => "stopped"
+SETTLE_RUN          = 5                          # consecutive sub-threshold frames => settled
+
+
+def compute_phase_boundaries(true_positions,
+                             contact_z_thresh=CONTACT_Z_THRESH,
+                             settle_speed_thresh=SETTLE_SPEED_THRESH,
+                             settle_run=SETTLE_RUN):
+    """
+    Returns (t_contact, t_settle) splitting a trajectory into:
+        airborne : [0, t_contact)
+        contact  : [t_contact, t_settle)   (impact + bounce/slide transient)
+        settled  : [t_settle, T)
+    Defined on ground truth so boundaries are identical across models/ablations.
+    """
+    T = true_positions.shape[0]
+    min_z = true_positions[..., 2].min(dim=1).values        # (T,) lowest node each frame
+    cm    = true_positions.mean(dim=1)                       # (T,3)
+    speed = torch.norm(cm[1:] - cm[:-1], dim=-1)             # (T-1,) per-step COM displacement
+
+    contact_mask = min_z <= contact_z_thresh
+    nz = torch.nonzero(contact_mask, as_tuple=False)
+    t_contact = int(nz[0].item()) if nz.numel() > 0 else T   # T => never contacts (all airborne)
+
+    t_settle = T
+    below = speed < settle_speed_thresh
+    for t in range(min(t_contact, len(speed)), len(speed) - settle_run + 1):
+        if bool(below[t:t + settle_run].all()):
+            t_settle = t
+            break
+    return t_contact, t_settle
 
 #Computes the angle difference between two rotation matrices.
 def angle_between_rotations(R_pred, R_true):
@@ -83,6 +116,21 @@ def compute_metrics(pred_positions, true_positions, rest_positions):
     z = pred_positions[..., 2]  # (T,N)
     floor_penetrations = torch.clamp(-z, min=0.0).amax(dim=1) / BLOCK_WIDTH  # (T,)
 
+    t_contact, t_settle = compute_phase_boundaries(true_positions)
+
+    def _phase_avg(vec):
+        T_ = vec.shape[0]
+        out = {}
+        for name, sl in (('airborne', slice(0, t_contact)),
+                         ('contact',  slice(t_contact, t_settle)),
+                         ('settled',  slice(t_settle, T_))):
+            seg = vec[sl]
+            out[name] = seg.mean().item() if seg.numel() > 0 else float('nan')
+        return out
+
+    center_phase = _phase_avg(center_errors)
+    angle_phase  = _phase_avg(torch.rad2deg(angle_errors))
+
     #Returns all of the metrics averaged across the trajectory, 
     #as well as the per-timestep values for each metric for further analysis if desired.
     # print("Center error for whole trajectory:")
@@ -98,6 +146,13 @@ def compute_metrics(pred_positions, true_positions, rest_positions):
         'center_error_t':          center_errors.detach().cpu(),
         'angle_error_t_deg':       torch.rad2deg(angle_errors).detach().cpu(),
         'floor_penetration_t':     floor_penetrations.detach().cpu(),
+        'center_error_airborne': center_phase['airborne'],
+        'center_error_contact':  center_phase['contact'],
+        'center_error_settled':  center_phase['settled'],
+        'angle_error_airborne':  angle_phase['airborne'],
+        'angle_error_contact':   angle_phase['contact'],
+        'angle_error_settled':   angle_phase['settled'],
+        't_contact': t_contact, 't_settle': t_settle,
     }
 
 
@@ -113,6 +168,9 @@ def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, node
     all_center_errors = []
     all_angle_errors = []
     all_floor_penetrations = []
+    phase_keys = ['center_error_airborne','center_error_contact','center_error_settled',
+                  'angle_error_airborne','angle_error_contact','angle_error_settled']
+    phase_acc = {k: [] for k in phase_keys}
 
     #runs through each trajectory in the test set
     for throw_number in test_trajectory_indices:
@@ -147,11 +205,28 @@ def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, node
         all_angle_errors.append(metrics['angle_error_deg'])
         all_floor_penetrations.append(metrics['floor_penetration'])
 
+        for k in phase_keys:
+            phase_acc[k].append(metrics[k])
+
+    
+    
+
     #Prints the average and standard deviation of each metric across the test set.
     print("\n--- Test Set Metrics ---")
     print(f"Center Error ( / width):   {np.mean(all_center_errors):.4f} ± {np.std(all_center_errors):.4f}")
     print(f"Angle Error (degrees):     {np.mean(all_angle_errors):.4f} ± {np.std(all_angle_errors):.4f}")
     print(f"Floor Penetration (/ width):         {np.mean(all_floor_penetrations):.4f} ± {np.std(all_floor_penetrations):.4f}")
+
+    # ...after the loop, with the other prints:
+    print("\n--- Phase breakdown (airborne / contact / settled) ---")
+    print(f"Center (/width): "
+        f"{np.nanmean(phase_acc['center_error_airborne']):.4f} / "
+        f"{np.nanmean(phase_acc['center_error_contact']):.4f} / "
+        f"{np.nanmean(phase_acc['center_error_settled']):.4f}")
+    print(f"Angle (deg):     "
+        f"{np.nanmean(phase_acc['angle_error_airborne']):.4f} / "
+        f"{np.nanmean(phase_acc['angle_error_contact']):.4f} / "
+        f"{np.nanmean(phase_acc['angle_error_settled']):.4f}")
 
     return {
         'center_error':      np.mean(all_center_errors),
