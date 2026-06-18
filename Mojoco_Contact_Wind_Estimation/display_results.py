@@ -379,7 +379,7 @@ def _build_feedback_features(positions_history, edge_index, rest_positions, Wall
     N = x_t.shape[0]
     node_parts = [v_fd]
     if use_wind:
-        u, u_norm = relative_wind(wind_vector, v_curr)      # wind (3,) broadcasts to (N,3)
+        u, u_norm = relative_wind(wind_vector.to(x_t.device), v_curr)
         node_parts += [u, u_norm]
     node_parts.append(b)
     x_node = torch.cat(node_parts, dim=-1)
