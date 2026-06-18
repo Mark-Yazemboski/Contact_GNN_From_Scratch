@@ -146,7 +146,7 @@ def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_rang
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    save_dir = os.path.join(script_dir, "data", "mojoco_Fixed_Wind_Throw_Direction_0_to_2.5_wind")
+    save_dir = os.path.join(script_dir, "data", "mojoco_fixed_height_High_Wind_0_10")
     os.makedirs(save_dir, exist_ok=True)
 
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
@@ -155,23 +155,24 @@ if __name__ == "__main__":
     n_trajectories = 2048
     n_steps = 200
     substeps = 50
-    visualize_first = False
+    visualize_first = True
 
     #What percentage of the total trajectories should be sliding-only (0.0 to 1.0)
-    sliding_percentage = .2
+    sliding_percentage = 0
 
     #----- Shared parameters -----
-    wind_range = (0, 2.5)
+    wind_range = (0, 10)
     mass = 0.37
 
-    FIX_WIND_DIR = True
-    FIX_TOSS_DIR = True
+    FIX_WIND_DIR = False
+    FIX_TOSS_DIR = False
+
     WIND_DIR = (0.0, 1.0, 0.0)
     TOSS_DIR = (1.0, 0.0, 0.0)
 
     #----- Toss-specific parameters -----
     toss_horizontal_pos_range = (-0.2, 0.2)
-    toss_vertical_pos_range = (0.3, 0.8)
+    toss_vertical_pos_range = (11, 11) #CHANGED THIS TO FIXED START HEIGHT SO IT NEVER CONTACTS
     toss_horizontal_speed_range = (-1.25, 1.25)
     toss_vertical_speed_range = (-0.3, 0.3)
     toss_angvel_range = (-3, 3)
