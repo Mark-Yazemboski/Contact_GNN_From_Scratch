@@ -153,6 +153,7 @@ display_stats = True
 show_meshed_cube = False
 show_augmentation = False
 show_rollout = False
+plot_phase_curves = True
 
 #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #---------------------------------------------------------------------------------------------------------
@@ -366,6 +367,16 @@ if show_augmentation:
         save_path=os.path.join(script_dir, "Gifs/Showing_Rotated_Cube.gif"),
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
+    )
+
+if plot_phase_curves:
+    evaluate_metrics.plot_phase_error_curves(
+        trajectory_folder, model, Floor, test_range, nodes_per_edge,
+        K_nearest_neighbors, nodes_body, accel_std, accel_mean,
+        x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,
+        pos_history, use_wind=use_wind_feature,
+        zero_at_phase_start=True,
+        save_path=os.path.join(script_dir, "Plots/Error_plot.png")
     )
 
 

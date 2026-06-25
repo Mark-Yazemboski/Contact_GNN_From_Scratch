@@ -21,6 +21,104 @@ SETTLE_SPEED_THRESH = 0.01 * BLOCK_WIDTH       # per-step COM displacement below
 SETTLE_RUN          = 5                          # consecutive sub-threshold frames => settled
 
 
+def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indices,
+                            nodes_per_edge, nearest_neighbors, rest_positions,
+                            accel_std, accel_mean, x_mean, x_std, e_mean, e_std,
+                            weights_only_load, unscale_trajectory_data, h, use_wind=False,
+                            zero_at_phase_start=True, min_frac=0.5, save_path=None):
+    """
+    Per-frame error vs time, split into airborne / contact / settled, averaged over
+    the test set (mean +/- 1 std band). Re-indexes each phase to 'frames since phase
+    start' so trajectories with different contact times align.
+
+    zero_at_phase_start: subtract each trajectory's error at its phase start, so each
+        panel shows GROWTH within the phase (y can go negative => error shrank).
+    min_frac: only plot frames where >= this fraction of trajectories still contribute.
+    """
+    phases = ['airborne', 'contact', 'settled']
+    center_segs = {p: [] for p in phases}
+    angle_segs  = {p: [] for p in phases}
+
+    N = len(test_trajectory_indices)
+    print(f"[phase curves] rolling out {N} test trajectories "
+          f"(use_wind={use_wind})...", flush=True)
+
+    for i, throw_number in enumerate(test_trajectory_indices, 1):
+        pred_positions, true_positions, _ = rollout_trajectory_feedback_shape_match(
+            trajectory_folder, model, Wall,
+            throw_number=throw_number,
+            nodes_per_edge=nodes_per_edge, nearest_neighbors=nearest_neighbors,
+            rest_positions=rest_positions, accel_std=accel_std, accel_mean=accel_mean,
+            x_mean=x_mean, x_std=x_std, e_mean=e_mean, e_std=e_std,
+            do_shape_match=True, shape_alpha=1.0, return_edge_info=True,
+            weights_only_load=weights_only_load,
+            unscale_trajectory_data=unscale_trajectory_data, h=h, use_wind=use_wind,
+        )
+        m = compute_metrics(pred_positions, true_positions, rest_positions)
+        ce = m['center_error_t'].numpy()
+        ae = m['angle_error_t_deg'].numpy()
+        tc, ts = compute_phase_boundaries(true_positions)
+        bounds = {'airborne': (0, tc), 'contact': (tc, ts), 'settled': (ts, len(ce))}
+        for p in phases:
+            a, b = bounds[p]
+            if b - a < 1:
+                continue
+            cseg, aseg = ce[a:b].copy(), ae[a:b].copy()
+            if zero_at_phase_start:
+                cseg = cseg - cseg[0]
+                aseg = aseg - aseg[0]
+            center_segs[p].append(cseg)
+            angle_segs[p].append(aseg)
+
+        print(f"  [{i:>3}/{N}] traj {throw_number}: "
+              f"airborne {tc:>3}  contact {ts - tc:>3}  settled {len(ce) - ts:>3} frames",
+              flush=True)
+
+    print(f"[phase curves] rollouts done, building figure...", flush=True)
+
+    def stack_stats(seg_list):
+        if not seg_list:
+            return None
+        maxlen = max(len(s) for s in seg_list)
+        arr = np.full((len(seg_list), maxlen), np.nan)
+        for i, s in enumerate(seg_list):
+            arr[i, :len(s)] = s
+        return (np.nanmean(arr, axis=0), np.nanstd(arr, axis=0),
+                np.sum(~np.isnan(arr), axis=0))
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    row_info = [(center_segs, 'center error (/width)'), (angle_segs, 'angle error (deg)')]
+    for row, (segdict, ylabel) in enumerate(row_info):
+        for col, p in enumerate(phases):
+            ax = axes[row, col]
+            stats = stack_stats(segdict[p])
+            if stats is None:
+                ax.set_title(f"{p}: no data"); ax.grid(alpha=0.3); continue
+            mean, std, n = stats
+            keep = n >= max(3, int(min_frac * n.max()))
+            x = np.arange(len(mean))[keep]
+            ax.plot(x, mean[keep], color='C0', lw=2)
+            ax.fill_between(x, (mean - std)[keep], (mean + std)[keep], alpha=0.25, color='C0')
+            if zero_at_phase_start:
+                ax.axhline(0.0, color='k', lw=0.6, ls='--', alpha=0.5)
+            med_len = int(np.median([len(s) for s in segdict[p]]))
+            if row == 0:
+                ax.set_title(f"{p}  (n={len(segdict[p])}, median {med_len} frames)")
+            if row == 1:
+                ax.set_xlabel("frames since phase start")
+            if col == 0:
+                ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.3)
+
+    ttl = "Per-phase error growth" + ("  (zeroed at phase start)" if zero_at_phase_start else "  (absolute)")
+    fig.suptitle(ttl, fontsize=13)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved phase error curves to {save_path}")
+    plt.show()
+
+
 def compute_phase_boundaries(true_positions,
                              contact_z_thresh=CONTACT_Z_THRESH,
                              settle_speed_thresh=SETTLE_SPEED_THRESH,

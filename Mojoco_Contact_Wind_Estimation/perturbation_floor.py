@@ -65,7 +65,7 @@ PERTURB_MODE = "toss_start"
 # When True, skip the sweep and instead replay ONE reference toss (blue) against
 # its N_PERTURB perturbations (red, transparent) in a single MuJoCo viewer, so you
 # can eyeball that the perturbed trajectories really are nearly on top of each other.
-VISUALIZE     = False
+VISUALIZE     = True
 VIS_EPS_MULT  = 10.0    # which epsilon level to visualize (one of EPS_MULTIPLIERS)
 VIS_PLAYBACK  = 0.02   # seconds between replayed frames
 
@@ -277,7 +277,7 @@ def visualize_overlay(model, mult, rng):
     T = min([len(ref_qpos)] + [len(p) for p in pert_qpos_list])
 
     with mujoco.viewer.launch_passive(vmodel, vdata) as viewer:
-        time.sleep(2)
+        time.sleep(15)
         for t in range(T):
             # ref occupies qpos[0:7], pert i occupies qpos[7*(i+1):7*(i+2)]
             vdata.qpos[0:3] = ref_qpos[t, :3]
