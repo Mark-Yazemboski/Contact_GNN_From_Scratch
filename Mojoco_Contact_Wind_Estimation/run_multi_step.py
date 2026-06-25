@@ -172,10 +172,10 @@ use_wind_feature = True
 #run the visualizations without having to retrain the model every time you run the code.
 Train = True
 #------------------------------------------------------------------------------------------------------
-
+model_folder_path = os.path.join(script_dir, f"models/Testing")
 #Model save/load settings.
 # save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(script_dir, f"models/Testing/{Used_Num_train_trajectories}_train_gns_model.pt")
+save_model_path = os.path.join(model_folder_path, f"{Used_Num_train_trajectories}_train_gns_model.pt")
 
 
 #Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
@@ -195,7 +195,7 @@ copy_weights_only_path = None
 #Set this to a checkpoint file or model file to load for inference.
 #If None, the script will load the final model saved after training.
 # inference_model_path = None
-inference_model_path = os.path.join(script_dir, f"models/Testing/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = os.path.join(model_folder_path, f"{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
 # inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
 
@@ -336,7 +336,7 @@ if display_loss_curves:
         val_loss_epochs=val_loss_epochs,
         val_loss_values=val_loss_values,
         title="Training and Validation Loss",
-        save_path=os.path.join(script_dir, "Plots/loss_curve.png"),
+        save_path=os.path.join(model_folder_path, "loss_curve.png"),
         show_plot=True
     )
 
@@ -364,7 +364,7 @@ if show_augmentation:
     display_results.animate_augmented_data(
         Floor,
         throw_number=throw_number,
-        save_path=os.path.join(script_dir, "Gifs/Showing_Rotated_Cube.gif"),
+        save_path=os.path.join(model_folder_path, "augmented_data.gif"),
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
     )
@@ -376,7 +376,7 @@ if plot_phase_curves:
         x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,
         pos_history, use_wind=use_wind_feature,
         zero_at_phase_start=True,
-        save_path=os.path.join(script_dir, "Plots/Error_plot.png")
+        save_path=os.path.join(model_folder_path, "phase_error_curves.png"),
     )
 
 
@@ -414,5 +414,5 @@ if show_rollout:
         pred_positions,
         true_positions,
         edge_info=edge_info,
-        save_path=os.path.join(script_dir, "Gifs/Big_2500_final_one.gif")
+        save_path=os.path.join(model_folder_path, "rollout_trajectory.gif"),
     )
