@@ -10,6 +10,8 @@ from generate_node_states import get_clean_positions, add_random_walk_noise, rel
 from fast_batch import build_epoch_tensors, iterate_batches, n_batches
 import time
 
+BLOCK_WIDTH_FOR_LOSS = 2 * 0.0524
+
 def _triton_available():
     try:
         import triton  # noqa: F401
@@ -452,6 +454,127 @@ def rotate_chain_batch(batch):
     batch["noise_at_input"] = batch["noise_at_input"] @ R.T
     return batch
 
+def build_chain_index(dataset_train, h, multistep, stride=1):
+    """List of (traj_idx, start_t). Each chain needs h+1 input frames + multistep targets."""
+    span = h + 1 + multistep
+    index = []
+    for ti, traj in enumerate(dataset_train):
+        last_start = traj["positions"].shape[0] - span
+        for s in range(0, last_start + 1, stride):
+            index.append((ti, s))
+    return index
+
+
+def n_chain_batches(chain_index, batch_size):
+    return (len(chain_index) + batch_size - 1) // batch_size
+
+
+def iterate_chain_batches(dataset_train, chain_index, batch_size, h, multistep,
+                          device, shuffle=True):
+    """Yields chain batches as dicts. Gathers windows on the fly (light on memory)."""
+    ei_cpu = dataset_train[0]["edge_index"]
+    N = dataset_train[0]["positions"].shape[1]
+    nodes_body_single = dataset_train[0]["nodes_body"]
+
+    order = torch.randperm(len(chain_index)) if shuffle else torch.arange(len(chain_index))
+    for start in range(0, len(chain_index), batch_size):
+        sel = order[start:start + batch_size].tolist()
+        B = len(sel)
+
+        win_frames = [[] for _ in range(h + 1)]
+        targ, winds = [], []
+        for idx in sel:
+            ti, s = chain_index[idx]
+            pos = dataset_train[ti]["positions"]            # (T, N, 3) on CPU
+            for j in range(h + 1):
+                win_frames[j].append(pos[s + j])
+            targ.append(pos[s + h + 1 : s + h + 1 + multistep])   # (multistep, N, 3)
+            winds.append(dataset_train[ti]["wind_vector"])
+
+        window = [torch.stack(f, 0).to(device) for f in win_frames]   # h+1 x (B,N,3)
+        targets = torch.stack(targ, 0).to(device)                     # (B, multistep, N, 3)
+        wind = torch.stack(winds, 0).to(device)                       # (B, 3)
+        nodes_body = nodes_body_single.unsqueeze(0).expand(B, -1, -1).to(device)
+        edge_index_b = torch.cat([ei_cpu.to(device) + b * N for b in range(B)], dim=1)
+
+        yield {"window": window, "targets": targets, "wind": wind,
+               "nodes_body": nodes_body, "edge_index_b": edge_index_b, "B": B, "N": N}
+
+
+def rotate_chain(batch):
+    """z-rotation augmentation for a chain batch. Positions, targets, wind, and the rest
+    mesh all rotate by the same R; the wall-distance feature is z-invariant, so it stays
+    consistent. (Supersedes the old rotate_chain_batch, which used a different key set.)"""
+    R = random_z_rotation().to(batch["wind"].device)
+    batch["window"]     = [w @ R.T for w in batch["window"]]
+    batch["targets"]    = batch["targets"]    @ R.T
+    batch["nodes_body"] = batch["nodes_body"] @ R.T
+    batch["wind"]       = batch["wind"]       @ R.T
+    return batch
+
+
+def _unroll_chain_loss(model, batch, multistep, Wall, h,
+                       x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
+                       use_wind=False, block_width=BLOCK_WIDTH_FOR_LOSS):
+    """Unroll the model `multistep` steps from a true window; POSITION MSE vs truth,
+    full backprop through the rollout. Reuses _build_features_for_unroll + the exact
+    integration from _rollout_validation_batched. No shape-matching during training
+    (matches the paper; loss is on raw network predictions)."""
+    window  = list(batch["window"])         # h+1 x (B,N,3)
+    targets = batch["targets"]              # (B, multistep, N, 3)
+    wind    = batch["wind"]
+    nodes_body   = batch["nodes_body"]
+    edge_index_b = batch["edge_index_b"]
+    B, N = batch["B"], batch["N"]
+
+    preds = []
+    for _ in range(multistep):
+        x_node, e_attr = _build_features_for_unroll(
+            window, edge_index_b, nodes_body, Wall, wind,
+            x_mean, x_std, e_mean, e_std, B, N, use_wind=use_wind,
+        )
+        data = Data(x=x_node, edge_index=edge_index_b, edge_attr=e_attr)
+        a = (model(data) * acc_std + acc_mean).reshape(B, N, 3)
+        x_next = a + 2.0 * window[-1] - window[-2]      # gradients flow through window
+        preds.append(x_next)
+        window = window[1:] + [x_next]
+
+    preds = torch.stack(preds, dim=1)                   # (B, multistep, N, 3)
+    return ((preds - targets) / block_width).pow(2).mean()
+
+def _unroll_chain_loss_accel(model, batch, multistep, Wall, h,
+                             x_mean, x_std, e_mean, e_std, acc_mean, acc_std,
+                             use_wind=False):
+    window  = list(batch["window"])         # h+1 x (B,N,3)
+    targets = batch["targets"]              # (B, multistep, N, 3) TRUE positions
+    wind, nodes_body = batch["wind"], batch["nodes_body"]
+    edge_index_b, B, N = batch["edge_index_b"], batch["B"], batch["N"]
+
+    total = 0.0
+    for k in range(multistep):
+        x_node, e_attr = _build_features_for_unroll(
+            window, edge_index_b, nodes_body, Wall, wind,
+            x_mean, x_std, e_mean, e_std, B, N, use_wind=use_wind,
+        )
+        data = Data(x=x_node, edge_index=edge_index_b, edge_attr=e_attr)
+        pred_norm = model(data).reshape(B, N, 3)                 # normalized accel
+
+        # true accel for THIS step, from the true positions, normalized the same way
+        true_prev = window[-2]
+        true_curr = window[-1]
+        true_next = targets[:, k]
+        true_accel = true_next - 2.0 * true_curr + true_prev
+        true_accel_norm = (true_accel - acc_mean) / acc_std
+
+        total = total + (pred_norm - true_accel_norm).pow(2).mean()
+
+        # advance the window using the model's own prediction (this is what injects drift)
+        a = (pred_norm * acc_std + acc_mean)
+        x_next = a + 2.0 * true_curr - true_prev
+        window = window[1:] + [x_next]
+
+    return total / multistep
+
 
 #This function trains the GNS model
 def train_gnn(Wall,
@@ -690,20 +813,16 @@ def train_gnn(Wall,
         total_loss_tensor = torch.zeros((), device=device)
         t0 = time.time()
         if multistep > 1:
-            # Build fresh chain samples this epoch (fresh noise on history)
-            # chain_samples = []
-            # for traj in dataset_train:
-            #     chain_samples.extend(
-            #         _build_chain_samples(traj, Wall, h=h, K=multistep, noise_scale=noise_scale)
-            #     )
-            # loader = torch.utils.data.DataLoader(
-            #     chain_samples, batch_size=batch_size, shuffle=True,
-            #     collate_fn=_collate_chain_batch,
-            #     num_workers=4, pin_memory=True,
-            # )
-            # num_batches = len(loader)
-            # batch_iter = enumerate(loader)
-            print("multistep > 1: no longer supported in this version.  Please set multistep=1 for now.")
+            chain_stride = 1
+            # Multi-step (pushforward) path: chains of consecutive frames, unrolled with
+            # a POSITION loss so accumulated drift (the constant-velocity bias) is penalized.
+            chain_index = build_chain_index(dataset_train, h=h, multistep=multistep,
+                                            stride=chain_stride)
+            num_batches = n_chain_batches(chain_index, batch_size)
+            batch_iter = enumerate(iterate_chain_batches(
+                dataset_train, chain_index, batch_size=batch_size,
+                h=h, multistep=multistep, device=device, shuffle=True,
+            ))
         else:
             # Single-step path: use fast_batch to skip PyG Data overhead.
             # Builds flat (total_M, N, F) tensors once and gathers slices per batch.
@@ -726,17 +845,14 @@ def train_gnn(Wall,
             torch.cuda.synchronize(); b0 = time.time()
  
             if multistep > 1:
-                # Move dict to device, rotate, unroll
-                # batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-                # batch = rotate_chain_batch(batch)
-                # torch.cuda.synchronize(); b1 = time.time()
-                # loss = _unroll_chain_loss_accel(
-                #     model, batch, K=multistep, Wall=Wall, h=h,
-                #     x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
-                #     accel_mean=acc_mean_gpu, accel_std=acc_std_gpu,
-                # )
-                # torch.cuda.synchronize(); b2 = time.time()
-                print("multistep > 1: no longer supported in this version.  Please set multistep=1 for now.")
+                batch = rotate_chain(batch)
+                torch.cuda.synchronize(); b1 = time.time()
+                loss = _unroll_chain_loss_accel(
+                    model, batch, multistep=multistep, Wall=Wall, h=h,
+                    x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
+                    acc_mean=acc_mean_gpu, acc_std=acc_std_gpu, use_wind=use_wind,
+                )
+                torch.cuda.synchronize(); b2 = time.time()
             else:
                 batch = rotate_batch(batch, h, use_wind)
                 torch.cuda.synchronize(); b1 = time.time()

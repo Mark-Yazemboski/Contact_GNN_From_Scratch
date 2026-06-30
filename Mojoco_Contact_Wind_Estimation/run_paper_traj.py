@@ -122,7 +122,7 @@ pos_history = 3
 Latent_dimension = 128
 
 #This is the number of steps to rollout the model during training for the multi-step loss.
-multistep = 1
+multistep = 4
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
