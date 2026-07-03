@@ -470,7 +470,7 @@ def n_chain_batches(chain_index, batch_size):
 
 
 def iterate_chain_batches(dataset_train, chain_index, batch_size, h, multistep,
-                          device, shuffle=True):
+                          device, shuffle=True, noise_scale=0.0):
     """Yields chain batches as dicts. Gathers windows on the fly (light on memory)."""
     ei_cpu = dataset_train[0]["edge_index"]
     N = dataset_train[0]["positions"].shape[1]
@@ -492,6 +492,17 @@ def iterate_chain_batches(dataset_train, chain_index, batch_size, h, multistep,
             winds.append(dataset_train[ti]["wind_vector"])
 
         window = [torch.stack(f, 0).to(device) for f in win_frames]   # h+1 x (B,N,3)
+
+        # --- Random-walk noise on the INPUT window only (targets stay clean) ---
+        # Same convention as add_random_walk_noise: i.i.d. velocity noise per
+        # transition, cumsum'd into position offsets; frame 0 stays clean.
+        if noise_scale > 0:
+            vel_noise = torch.randn(h, B, N, 3, device=device) * noise_scale
+            pos_noise = torch.cumsum(vel_noise, dim=0)        # (h, B, N, 3)
+            for j in range(h):
+                window[j + 1] = window[j + 1] + pos_noise[j]
+
+
         targets = torch.stack(targ, 0).to(device)                     # (B, multistep, N, 3)
         wind = torch.stack(winds, 0).to(device)                       # (B, 3)
         nodes_body = nodes_body_single.unsqueeze(0).expand(B, -1, -1).to(device)
@@ -821,7 +832,7 @@ def train_gnn(Wall,
             num_batches = n_chain_batches(chain_index, batch_size)
             batch_iter = enumerate(iterate_chain_batches(
                 dataset_train, chain_index, batch_size=batch_size,
-                h=h, multistep=multistep, device=device, shuffle=True,
+                h=h, multistep=multistep, device=device, shuffle=True, noise_scale=noise_scale
             ))
         else:
             # Single-step path: use fast_batch to skip PyG Data overhead.
