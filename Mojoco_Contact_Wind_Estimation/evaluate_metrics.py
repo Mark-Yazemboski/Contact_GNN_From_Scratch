@@ -97,8 +97,29 @@ def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indi
             mean, std, n = stats
             keep = n >= max(3, int(min_frac * n.max()))
             x = np.arange(len(mean))[keep]
-            ax.plot(x, mean[keep], color='C0', lw=2)
+            y = mean[keep]
+
+            # Compute slope of the mean curve
+            if len(x) >= 2:
+                slope, intercept = np.polyfit(x, y, 1)
+
+            ax.plot(x, y, color='C0', lw=2)
             ax.fill_between(x, (mean - std)[keep], (mean + std)[keep], alpha=0.25, color='C0')
+            if len(x) >= 2:
+                # Optional: show linear fit
+                ax.plot(x, slope * x + intercept,
+                        color='C3', ls='--', lw=1.5)
+
+                # Show slope on the subplot
+                ax.text(
+                    0.03, 0.97,
+                    f"Slope = {slope:.4f}",
+                    transform=ax.transAxes,
+                    ha='left',
+                    va='top',
+                    fontsize=9,
+                    bbox=dict(facecolor='white', alpha=0.7, edgecolor='none')
+                )
             if zero_at_phase_start:
                 ax.axhline(0.0, color='k', lw=0.6, ls='--', alpha=0.5)
             med_len = int(np.median([len(s) for s in segdict[p]]))
