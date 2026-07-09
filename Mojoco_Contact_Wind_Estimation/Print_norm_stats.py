@@ -13,8 +13,20 @@ norms = torch.load(file_location, map_location="cpu")
 print("Keys:", norms.keys())
 
 # Print the variables of interest
+print("\nacc_mean:")
+print(norms["acc_mean"])
+
 print("\nacc_std:")
 print(norms["acc_std"])
+
+print("\ne_mean:")
+print(norms["e_mean"])
+
+print("\ne_std:")
+print(norms["e_std"])
+
+print("\nx_mean:")
+print(norms["x_mean"])
 
 print("\nx_std:")
 print(norms["x_std"])
