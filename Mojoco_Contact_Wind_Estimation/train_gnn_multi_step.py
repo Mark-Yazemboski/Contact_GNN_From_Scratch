@@ -710,6 +710,8 @@ def train_gnn(Wall,
         print("torch.compile disabled (no CUDA/Triton) — running eager mode.")
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(
+        optimizer, gamma=(1e-2) ** (1.0 / max(1, epochs)))
 
     def _coerce_cpu_byte_tensor(state):
         if state is None:
@@ -720,6 +722,7 @@ def train_gnn(Wall,
 
     #Optionally resume training from a previous checkpoint.
     start_epoch = 0
+    
     if resume_checkpoint_path is not None:
         checkpoint = torch.load(resume_checkpoint_path, map_location=device, weights_only=False)
 
@@ -762,6 +765,8 @@ def train_gnn(Wall,
 
             start_epoch = int(checkpoint.get("epoch", -1)) + 1
             print(f"Resumed training from checkpoint {resume_checkpoint_path} at epoch {start_epoch}")
+            for _ in range(start_epoch):
+                scheduler.step()
         else:
             model.load_state_dict(checkpoint)
             print(f"Loaded model weights from {resume_checkpoint_path}")
@@ -893,6 +898,7 @@ def train_gnn(Wall,
         train_loss_epochs.append(epoch_num)
         train_loss_values.append(float(avg_train_loss))
         t2 = time.time()
+        scheduler.step()
         if epoch % validation_check_interval == 0:
             # --- Validation ---
             if not use_rollout_validation:
