@@ -454,14 +454,20 @@ def rotate_chain_batch(batch):
     batch["noise_at_input"] = batch["noise_at_input"] @ R.T
     return batch
 
-def build_chain_index(dataset_train, h, multistep, stride=1):
-    """List of (traj_idx, start_t). Each chain needs h+1 input frames + multistep targets."""
+def build_chain_index(dataset_train, h, multistep, stride=1,
+                      t_contact_list=None, impact_weight=1):
+    """List of (traj_idx, start_t). Chains whose PREDICTED span
+    [s+h+1, s+h+multistep] contains the impact frame are appended
+    impact_weight times (importance sampling on the impulse)."""
     span = h + 1 + multistep
     index = []
     for ti, traj in enumerate(dataset_train):
         last_start = traj["positions"].shape[0] - span
+        tc = t_contact_list[ti] if t_contact_list is not None else None
         for s in range(0, last_start + 1, stride):
-            index.append((ti, s))
+            straddles = (tc is not None) and (s + h < tc <= s + h + multistep)
+            reps = impact_weight if straddles else 1
+            index.extend([(ti, s)] * reps)
     return index
 
 
@@ -832,8 +838,12 @@ def train_gnn(Wall,
             chain_stride = 1
             # Multi-step (pushforward) path: chains of consecutive frames, unrolled with
             # a POSITION loss so accumulated drift (the constant-velocity bias) is penalized.
+            from evaluate_metrics import compute_phase_boundaries   # lazy: avoids circular import
+            t_contact_list = [compute_phase_boundaries(traj["positions"])[0]
+                            for traj in dataset_train]
             chain_index = build_chain_index(dataset_train, h=h, multistep=multistep,
-                                            stride=chain_stride)
+                                            stride=1, t_contact_list=t_contact_list,
+                                            impact_weight=8)
             num_batches = n_chain_batches(chain_index, batch_size)
             batch_iter = enumerate(iterate_chain_batches(
                 dataset_train, chain_index, batch_size=batch_size,
