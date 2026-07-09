@@ -87,7 +87,7 @@ def build_epoch_tensors(dataset_train, Wall, h, noise_scale=3e-4,
 
         # ---- Wall distance ----
         rel_pos = noisy_positions[h : T-1] - wall_c
-        dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+        dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(-0.05, 0.5)
 
 
         # ---- Node features ----

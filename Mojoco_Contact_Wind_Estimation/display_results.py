@@ -374,7 +374,7 @@ def _build_feedback_features(positions_history, edge_index, rest_positions, Wall
     if Wall is not None:
         wall_n = torch.as_tensor(Wall.normal, dtype=x_t.dtype, device=x_t.device)
         wall_c = torch.as_tensor(Wall.center_position, dtype=x_t.dtype, device=x_t.device)
-        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+        b = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(-0.05, 0.5)
 
     N = x_t.shape[0]
     node_parts = [v_fd]

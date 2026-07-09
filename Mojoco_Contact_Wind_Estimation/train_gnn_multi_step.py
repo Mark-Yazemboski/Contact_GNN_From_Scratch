@@ -320,7 +320,7 @@ def _build_timestep_samples(traj, Wall, h, noise_scale=3e-4,
  
     # ---- Wall distance (vectorized over t) ----
     rel_pos = noisy_positions[h : T-1] - wall_c                        # (M, N, 3)
-    dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (M, N, 1)
+    dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(-0.05, 0.5)  # (M, N, 1)
  
     # ---- Node features ----
     v_curr = v_fd_list[0]
@@ -416,7 +416,7 @@ def _build_features_for_unroll(pos_window, edge_index, nodes_body, Wall, wind,
     x_t = pos_window[-1]
     wall_n = torch.as_tensor(Wall.normal,           dtype=x_t.dtype, device=device)
     wall_c = torch.as_tensor(Wall.center_position,  dtype=x_t.dtype, device=device)
-    dist = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)  # (B, N, 1)
+    dist = torch.sum((x_t - wall_c) * wall_n, dim=-1, keepdim=True).clamp(-0.05, 0.5)  # (B, N, 1)
 
     node_parts = [v_fd]
     if use_wind:

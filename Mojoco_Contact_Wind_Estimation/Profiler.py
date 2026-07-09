@@ -216,7 +216,7 @@ def main():
         v_fd_all = torch.cat(v_fd_list, dim=-1)
 
         rel_pos = noisy_positions[H : T-1] - wall_c
-        dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(0.0, 0.5)
+        dist_all = torch.sum(rel_pos * wall_n, dim=-1, keepdim=True).clamp(-0.05, 0.5)
         wind_broadcast = wind_vector.view(1, 1, -1).expand(M, N, -1)
         x_node_all = torch.cat([v_fd_all, wind_broadcast, dist_all], dim=-1)
 
