@@ -102,6 +102,21 @@ def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indi
             # Compute slope of the mean curve
             if len(x) >= 2:
                 slope, intercept = np.polyfit(x, y, 1)
+            else:
+                slope = np.nan
+                intercept = np.nan
+
+            med_len = int(np.median([len(s) for s in segdict[p]]))
+            max_mean_error = np.nanmax(y) if len(y) > 0 else np.nan
+
+            metric_name = "Center Error" if row == 0 else "Angle Error"
+
+            print(
+                f"{metric_name:12s} | {p:9s} | "
+                f"Median Frames: {med_len:3d} | "
+                f"Slope: {slope:8.5f} | "
+                f"Max Mean Error: {max_mean_error:8.5f}"
+            )
 
             ax.plot(x, y, color='C0', lw=2)
             ax.fill_between(x, (mean - std)[keep], (mean + std)[keep], alpha=0.25, color='C0')
