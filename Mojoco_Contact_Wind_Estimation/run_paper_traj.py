@@ -109,7 +109,7 @@ learning_rate = 1e-4
 noise_scale = 3e-4*BLOCK_HALF_WIDTH
 
 #This is the total number of optimizer steps to train for. 
-steps = 1000000
+steps = 100
 
 #This is the number of timesteps in each trajectory. 
 traj_timesteps = 200
@@ -123,6 +123,7 @@ Latent_dimension = 128
 
 #This is the number of steps to rollout the model during training for the multi-step loss.
 multistep = 4
+impact_weight = 8
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
@@ -241,7 +242,8 @@ if Train:
         multistep=multistep,
         latent_dim=Latent_dimension,
         use_rollout_validation = True,
-        use_wind=use_wind_feature
+        use_wind=use_wind_feature,
+        impact_weight = impact_weight
     )
 
 

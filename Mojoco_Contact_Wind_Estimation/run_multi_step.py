@@ -123,6 +123,7 @@ Latent_dimension = 128
 
 #This is the number of steps to rollout the model during training for the multi-step loss.
 multistep = 1
+impact_weight = 1
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
@@ -241,7 +242,8 @@ if Train:
         multistep=multistep,
         latent_dim=Latent_dimension,
         use_rollout_validation = True,
-        use_wind=use_wind_feature
+        use_wind=use_wind_feature,
+        impact_weight = impact_weight
     )
 
 

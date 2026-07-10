@@ -621,7 +621,8 @@ def train_gnn(Wall,
               multistep = 1,
               latent_dim = 128,
               use_rollout_validation=False,
-              use_wind=False):
+              use_wind=False,
+              impact_weight= 1):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -843,7 +844,7 @@ def train_gnn(Wall,
                             for traj in dataset_train]
             chain_index = build_chain_index(dataset_train, h=h, multistep=multistep,
                                             stride=1, t_contact_list=t_contact_list,
-                                            impact_weight=8)
+                                            impact_weight=impact_weight)
             num_batches = n_chain_batches(chain_index, batch_size)
             batch_iter = enumerate(iterate_chain_batches(
                 dataset_train, chain_index, batch_size=batch_size,
