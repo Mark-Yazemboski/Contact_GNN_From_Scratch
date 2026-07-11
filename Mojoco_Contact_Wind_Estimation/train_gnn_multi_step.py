@@ -9,6 +9,7 @@ from torch_geometric.loader import DataLoader
 from generate_node_states import get_clean_positions, add_random_walk_noise, relative_wind
 from fast_batch import build_epoch_tensors, iterate_batches, n_batches
 import time
+import math
 
 BLOCK_WIDTH_FOR_LOSS = 2 * 0.0524
 
@@ -622,7 +623,8 @@ def train_gnn(Wall,
               latent_dim = 128,
               use_rollout_validation=False,
               use_wind=False,
-              impact_weight= 1):
+              impact_weight= 1,
+              Learning_Rate_Scheduler=None):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -717,8 +719,28 @@ def train_gnn(Wall,
         print("torch.compile disabled (no CUDA/Triton) — running eager mode.")
     #Sets the optimizer to Adam, which will be used to update the model parameters during training based on the computed gradients.
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(
-        optimizer, gamma=(1e-2) ** (1.0 / max(1, epochs)))
+    if Learning_Rate_Scheduler == "decay":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer, gamma=(1e-2) ** (1.0 / max(1, epochs)))
+    elif Learning_Rate_Scheduler == "cosine":
+        # Cosine cycles with decaying peaks (exploration), then a final anneal.
+        n_cycles, peak_decay, final_frac = 4, 0.5, 1e-2
+        explore_epochs = int(0.7 * epochs)
+        cycle_len = max(1, explore_epochs // n_cycles)
+        def _lam(ep):
+            if ep < explore_epochs:
+                cyc, pos = divmod(ep, cycle_len)
+                peak = peak_decay ** cyc
+                return final_frac + (peak - final_frac) * 0.5 * (1 + math.cos(math.pi * pos / cycle_len))
+            pos = (ep - explore_epochs) / max(1, epochs - explore_epochs)
+            peak = peak_decay ** n_cycles
+            return final_frac + (peak - final_frac) * 0.5 * (1 + math.cos(math.pi * pos))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lam)
+    elif Learning_Rate_Scheduler is not None:
+        raise ValueError(f"Unknown Learning_Rate_Scheduler: {Learning_Rate_Scheduler!r}")
+    else:
+        print("No learning rate scheduler used.")
+        scheduler = None
 
     def _coerce_cpu_byte_tensor(state):
         if state is None:
@@ -773,7 +795,8 @@ def train_gnn(Wall,
             start_epoch = int(checkpoint.get("epoch", -1)) + 1
             print(f"Resumed training from checkpoint {resume_checkpoint_path} at epoch {start_epoch}")
             for _ in range(start_epoch):
-                scheduler.step()
+                if scheduler is not None:
+                    scheduler.step()
         else:
             model.load_state_dict(checkpoint)
             print(f"Loaded model weights from {resume_checkpoint_path}")
@@ -830,6 +853,14 @@ def train_gnn(Wall,
     print(f"  Epochs: {epochs} | Batch size: {batch_size} | LR: {lr}")
 
     #Training loop
+    if multistep > 1:
+        from evaluate_metrics import compute_phase_boundaries   # lazy: avoids circular import
+        t_contact_list = [compute_phase_boundaries(traj["positions"])[0]
+                        for traj in dataset_train]
+        chain_index = build_chain_index(dataset_train, h=h, multistep=multistep,
+                                        stride=1, t_contact_list=t_contact_list,
+                                        impact_weight=impact_weight)
+    
     for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0.0
@@ -839,12 +870,6 @@ def train_gnn(Wall,
             chain_stride = 1
             # Multi-step (pushforward) path: chains of consecutive frames, unrolled with
             # a POSITION loss so accumulated drift (the constant-velocity bias) is penalized.
-            from evaluate_metrics import compute_phase_boundaries   # lazy: avoids circular import
-            t_contact_list = [compute_phase_boundaries(traj["positions"])[0]
-                            for traj in dataset_train]
-            chain_index = build_chain_index(dataset_train, h=h, multistep=multistep,
-                                            stride=1, t_contact_list=t_contact_list,
-                                            impact_weight=impact_weight)
             num_batches = n_chain_batches(chain_index, batch_size)
             batch_iter = enumerate(iterate_chain_batches(
                 dataset_train, chain_index, batch_size=batch_size,
@@ -909,7 +934,8 @@ def train_gnn(Wall,
         train_loss_epochs.append(epoch_num)
         train_loss_values.append(float(avg_train_loss))
         t2 = time.time()
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
         if epoch % validation_check_interval == 0:
             # --- Validation ---
             if not use_rollout_validation:

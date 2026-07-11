@@ -124,6 +124,7 @@ Latent_dimension = 128
 #This is the number of steps to rollout the model during training for the multi-step loss.
 multistep = 4
 impact_weight = 8
+Learning_Rate_Scheduler = "decay" #Options are "decay", "cosine", or None. If None, the learning rate will be constant.
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
