@@ -244,7 +244,8 @@ if Train:
         latent_dim=Latent_dimension,
         use_rollout_validation = True,
         use_wind=use_wind_feature,
-        impact_weight = impact_weight
+        impact_weight = impact_weight,
+        Learning_Rate_Scheduler = Learning_Rate_Scheduler
     )
 
 
