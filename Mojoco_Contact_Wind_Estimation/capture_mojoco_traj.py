@@ -5,6 +5,8 @@ import torch
 import os
 from scipy.spatial.transform import Rotation
 import time
+
+
 #This file will generate all of the training data we will use to train the contact and fluid GNN. Using mojoco's built in
 # physics engine, it will simulate the trajectory of a cube under the influence of different wind vectors, initial positions,
 #orientations, velocities, and angular velocities. The trajectories are saved as .pt files, which contain the trajectory data 
@@ -40,7 +42,7 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
     #rendering the cube's motion
     if visualize:
         with mujoco.viewer.launch_passive(model, data) as viewer:
-            time.sleep(3)  # wait for viewer to initialize
+            time.sleep(10)  # wait for viewer to initialize
             for _ in range(n_steps):
                 # Take multiple small physics steps per recorded frame
                 for _ in range(substeps):
@@ -66,6 +68,23 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
 
     trajectory = np.stack(states)
     return trajectory
+
+def generate_paper_matched_toss(mass):
+    pos = np.array([np.random.uniform(-0.2, 0.2),
+                    np.random.uniform(-0.2, 0.2),
+                    np.random.uniform(0.119, 0.166)])      # measured z0 5-95%
+    quat = random_quat()
+    # horizontal: fixed-ish SPEED, uniform direction (measured: launcher-style)
+    speed = np.random.uniform(0.99, 1.27)                  # |vh0| 5-95%
+    theta = np.random.uniform(0, 2*np.pi)
+    vz    = np.random.uniform(-0.329, 0.173)               # signed vz0 5-95%
+    vel   = np.array([speed*np.cos(theta), speed*np.sin(theta), vz])
+    # spin: magnitude x random axis (measured |omega| 5-95%)
+    w_mag = np.random.uniform(1.6, 6.4)
+    axis  = np.random.randn(3); axis /= np.linalg.norm(axis) + 1e-8
+    angvel = w_mag * axis
+    return {'wind': np.zeros(3), 'pos': pos, 'quat': quat,
+            'vel': vel, 'angvel': angvel, 'mass': mass, 'type': 'toss'}
 
 
 #This function generates random initial conditions and parameters for the MuJoCo simulation, including a random wind vector,
@@ -146,14 +165,19 @@ def generate_sliding_params(mass, wind_range, sliding_speed_range, angvel_z_rang
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
-    save_dir = os.path.join(script_dir, "data", "mojoco_fixed_height_High_Wind_0_10")
+    save_dir = os.path.join(script_dir, "data", "mojoco_paper_matched_toss")
     os.makedirs(save_dir, exist_ok=True)
 
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
+    print("Friction parameters for the cube and floor geoms:")
+    print(model.geom_friction)
 
     #----- Dataset parameters -----
-    n_trajectories = 2048
-    n_steps = 200
+
+    Match_paper_traj = True
+
+    n_trajectories = 570
+    n_steps = 100
     substeps = 50
     visualize_first = True
 
@@ -161,7 +185,7 @@ if __name__ == "__main__":
     sliding_percentage = 0
 
     #----- Shared parameters -----
-    wind_range = (0, 10)
+    wind_range = (0, 0)
     mass = 0.37
 
     FIX_WIND_DIR = False
@@ -196,26 +220,28 @@ if __name__ == "__main__":
     print(f"Total: {n_trajectories} | Toss: {n_toss} | Sliding: {n_sliding} ({sliding_percentage*100:.0f}%)")
 
     for i in range(n_trajectories):
-
-        if i in sliding_indices:
-            params = generate_sliding_params(
-                mass=mass, wind_range=wind_range,
-                sliding_speed_range=sliding_speed_range,
-                angvel_z_range=sliding_angvel_z_range,
-                fix_wind_dir=FIX_WIND_DIR, wind_dir_fixed=WIND_DIR,
-                fix_slide_dir=FIX_TOSS_DIR, slide_dir_fixed=TOSS_DIR,   # or separate SLIDE_DIR flags
-            )
+        if not Match_paper_traj:
+            if i in sliding_indices:
+                params = generate_sliding_params(
+                    mass=mass, wind_range=wind_range,
+                    sliding_speed_range=sliding_speed_range,
+                    angvel_z_range=sliding_angvel_z_range,
+                    fix_wind_dir=FIX_WIND_DIR, wind_dir_fixed=WIND_DIR,
+                    fix_slide_dir=FIX_TOSS_DIR, slide_dir_fixed=TOSS_DIR,   # or separate SLIDE_DIR flags
+                )
+            else:
+                params = generate_toss_params(
+                    mass=mass, wind_range=wind_range,
+                    horizontal_pos_range=toss_horizontal_pos_range,
+                    vertical_pos_range=toss_vertical_pos_range,
+                    horizontal_speed_range=toss_horizontal_speed_range,
+                    vertical_speed_range=toss_vertical_speed_range,
+                    angvel_range=toss_angvel_range,
+                    fix_wind_dir=FIX_WIND_DIR, wind_dir_fixed=WIND_DIR,
+                    fix_toss_dir=FIX_TOSS_DIR, toss_dir_fixed=TOSS_DIR,
+                )
         else:
-            params = generate_toss_params(
-                mass=mass, wind_range=wind_range,
-                horizontal_pos_range=toss_horizontal_pos_range,
-                vertical_pos_range=toss_vertical_pos_range,
-                horizontal_speed_range=toss_horizontal_speed_range,
-                vertical_speed_range=toss_vertical_speed_range,
-                angvel_range=toss_angvel_range,
-                fix_wind_dir=FIX_WIND_DIR, wind_dir_fixed=WIND_DIR,
-                fix_toss_dir=FIX_TOSS_DIR, toss_dir_fixed=TOSS_DIR,
-            )
+            params = generate_paper_matched_toss(mass=mass)
 
         print(f"Trajectory {i} [{params['type']}]: wind={params['wind'].round(2)}, "
               f"mass={params['mass']:.2f}, "
