@@ -39,6 +39,8 @@ def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indi
     center_segs = {p: [] for p in phases}
     angle_segs  = {p: [] for p in phases}
 
+    slope_rows = []
+
     N = len(test_trajectory_indices)
     print(f"[phase curves] rolling out {N} test trajectories "
           f"(use_wind={use_wind})...", flush=True)
@@ -73,6 +75,8 @@ def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indi
         print(f"  [{i:>3}/{N}] traj {throw_number}: "
               f"airborne {tc:>3}  contact {ts - tc:>3}  settled {len(ce) - ts:>3} frames",
               flush=True)
+        
+        
 
     print(f"[phase curves] rollouts done, building figure...", flush=True)
 
@@ -118,6 +122,10 @@ def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indi
                 f"Max Mean Error: {max_mean_error:8.5f}"
             )
 
+            slope_rows.append(dict(metric=metric_name, phase=p,
+                                   median_frames=med_len, slope=float(slope),
+                                   max_mean_error=float(max_mean_error)))
+
             ax.plot(x, y, color='C0', lw=2)
             ax.fill_between(x, (mean - std)[keep], (mean + std)[keep], alpha=0.25, color='C0')
             if len(x) >= 2:
@@ -153,6 +161,8 @@ def plot_phase_error_curves(trajectory_folder, model, Wall, test_trajectory_indi
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Saved phase error curves to {save_path}")
     plt.show()
+
+    return slope_rows
 
 
 def compute_phase_boundaries(true_positions,
@@ -366,6 +376,16 @@ def evaluate_model(trajectory_folder, model, Wall, test_trajectory_indices, node
         'center_error':      np.mean(all_center_errors),
         'angle_error_deg':   np.mean(all_angle_errors),
         'floor_penetration': np.mean(all_floor_penetrations),
+        'center_error_std':      np.std(all_center_errors),
+        'angle_error_std':       np.std(all_angle_errors),
+        'floor_penetration_std': np.std(all_floor_penetrations),
+        'phase_center': [np.nanmean(phase_acc['center_error_airborne']),
+                         np.nanmean(phase_acc['center_error_contact']),
+                         np.nanmean(phase_acc['center_error_settled'])],
+        'phase_angle':  [np.nanmean(phase_acc['angle_error_airborne']),
+                         np.nanmean(phase_acc['angle_error_contact']),
+                         np.nanmean(phase_acc['angle_error_settled'])],
+        'n_test': len(all_center_errors),
     }
 
 

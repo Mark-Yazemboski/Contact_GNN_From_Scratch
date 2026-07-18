@@ -8,6 +8,7 @@ import display_results
 import evaluate_metrics
 import random
 import os
+from run_report import save_run_report
 
 torch.set_float32_matmul_precision('high')
 
@@ -150,11 +151,11 @@ validation_check_interval = 10
 #Meshed cube shows the initial node positions and edges. 
 #Augmentation shows the effect of random rotations on the trajectories. 
 #Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
-display_loss_curves = False
+display_loss_curves = True
 display_stats = True
 show_meshed_cube = False
 show_augmentation = False
-show_rollout = False
+show_rollout = True
 plot_phase_curves = True
 
 #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -347,7 +348,7 @@ if display_loss_curves:
 #This evaluates the model on the test set and prints out various metrics like mean positon error, 
 #mean angle error, and mean penitration error
 if display_stats:
-    evaluate_metrics.evaluate_model(trajectory_folder, model, Floor, test_range, nodes_per_edge, K_nearest_neighbors, nodes_body, 
+    metrics = evaluate_metrics.evaluate_model(trajectory_folder, model, Floor, test_range, nodes_per_edge, K_nearest_neighbors, nodes_body, 
                        accel_std, accel_mean, x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,pos_history, use_wind=use_wind_feature)
 
 
@@ -374,7 +375,7 @@ if show_augmentation:
     )
 
 if plot_phase_curves:
-    evaluate_metrics.plot_phase_error_curves(
+    slopes = evaluate_metrics.plot_phase_error_curves(
         trajectory_folder, model, Floor, test_range, nodes_per_edge,
         K_nearest_neighbors, nodes_body, accel_std, accel_mean,
         x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,
@@ -420,3 +421,13 @@ if show_rollout:
         edge_info=edge_info,
         save_path=os.path.join(model_folder_path, "rollout_trajectory.gif"),
     )
+
+
+settings = dict(
+dataset=trajectory_folder, n_train=Used_Num_train_trajectories,
+test_range=str(test_range), steps=steps, batch_size=batch_size, lr=learning_rate,
+multistep=multistep, impact_weight=impact_weight,
+scheduler=Learning_Rate_Scheduler, noise_scale=noise_scale,
+h=pos_history, use_wind=use_wind_feature,
+)
+save_run_report(os.path.dirname(save_model_path), settings, metrics, slopes)
