@@ -55,12 +55,12 @@ SUBSTEPS = 50
 MATCH_DATA_UNITS = True
 if MATCH_DATA_UNITS:
     GRAVITY = 9.615            # recovered g of the paper recordings
-    MU      = 1.8/GRAVITY          # measured slide decel (2.154 m/s^2) / 9.615
+    MU      = 1.9/GRAVITY          # measured slide decel (2.154 m/s^2) / 9.615
 else:
     GRAVITY = 9.81              # textbook physics (expect ~1 frame tc drift)
     MU      = 0.220
 CONE        = "elliptic"        # isotropic friction (learnable + physical)
-SOLREF_DAMP = 1.0               # sweep {1.0, 0.7, 0.5, 0.35} to hit e_z ~ 0.15
+SOLREF_DAMP = 0.5               # sweep {1.0, 0.7, 0.5, 0.35} to hit e_z ~ 0.15
 SOLREF_TIME = 0.02
 
 MIN_AIRBORNE_FIT = 5            # frames needed for the launch fits
