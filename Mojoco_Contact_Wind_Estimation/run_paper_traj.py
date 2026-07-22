@@ -126,6 +126,7 @@ Latent_dimension = 128
 multistep = 4
 impact_weight = 8
 Learning_Rate_Scheduler = "decay" #Options are "decay", "cosine", or None. If None, the learning rate will be constant.
+curriculum_epochs = 100 #number of epochs to linearly increase the rollout length from 1 to multistep.
 
 #The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
 # we use gradient accumulation over 8 steps.
@@ -246,7 +247,8 @@ if Train:
         use_rollout_validation = True,
         use_wind=use_wind_feature,
         impact_weight = impact_weight,
-        Learning_Rate_Scheduler = Learning_Rate_Scheduler
+        Learning_Rate_Scheduler = Learning_Rate_Scheduler,
+        curriculum_epochs = curriculum_epochs
     )
 
 

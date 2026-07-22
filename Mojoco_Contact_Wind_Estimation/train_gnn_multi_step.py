@@ -624,7 +624,10 @@ def train_gnn(Wall,
               use_rollout_validation=False,
               use_wind=False,
               impact_weight= 1,
-              Learning_Rate_Scheduler=None):
+              Learning_Rate_Scheduler=None,
+              curriculum_epochs = 0,          # 0 = off; else epochs per ramp phase
+              curriculum_schedule = None,     # e.g. [1,2,4,6,8]; None -> auto powers-of-2
+              ):
     
     #Sets device to GPU if available, otherwise CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -856,10 +859,16 @@ def train_gnn(Wall,
     if multistep > 1:
         from evaluate_metrics import compute_phase_boundaries   # lazy: avoids circular import
         t_contact_list = [compute_phase_boundaries(traj["positions"])[0]
-                        for traj in dataset_train]
-        chain_index = build_chain_index(dataset_train, h=h, multistep=multistep,
-                                        stride=1, t_contact_list=t_contact_list,
-                                        impact_weight=impact_weight)
+                        for traj in dataset_train]              # K-independent: compute once
+        if curriculum_epochs > 0 and curriculum_schedule is None:
+            ks, k = [], 1
+            while k < multistep:
+                ks.append(k); k *= 2
+            curriculum_schedule = ks + [multistep]              # e.g. 8 -> [1,2,4,8]
+        if curriculum_epochs > 0:
+            print(f"Multistep curriculum: {curriculum_schedule}, "
+                  f"{curriculum_epochs} epochs/phase, final K for the remainder")
+        _K_now, chain_index = None, None
     
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -867,13 +876,22 @@ def train_gnn(Wall,
         total_loss_tensor = torch.zeros((), device=device)
         t0 = time.time()
         if multistep > 1:
-            chain_stride = 1
-            # Multi-step (pushforward) path: chains of consecutive frames, unrolled with
-            # a POSITION loss so accumulated drift (the constant-velocity bias) is penalized.
+            if curriculum_epochs > 0:
+                phase = min(epoch // curriculum_epochs, len(curriculum_schedule) - 1)
+                K_epoch = curriculum_schedule[phase]
+            else:
+                K_epoch = multistep
+            if K_epoch != _K_now:               # phase transition: rebuild the index
+                _K_now = K_epoch
+                chain_index = build_chain_index(dataset_train, h=h, multistep=_K_now,
+                                                stride=1, t_contact_list=t_contact_list,
+                                                impact_weight=impact_weight)
+                print(f"[curriculum] epoch {epoch}: multistep K={_K_now} "
+                      f"({len(chain_index)} chains)")
             num_batches = n_chain_batches(chain_index, batch_size)
             batch_iter = enumerate(iterate_chain_batches(
                 dataset_train, chain_index, batch_size=batch_size,
-                h=h, multistep=multistep, device=device, shuffle=True, noise_scale=noise_scale
+                h=h, multistep=_K_now, device=device, shuffle=True, noise_scale=noise_scale
             ))
         else:
             # Single-step path: use fast_batch to skip PyG Data overhead.
@@ -900,7 +918,7 @@ def train_gnn(Wall,
                 batch = rotate_chain(batch)
                 torch.cuda.synchronize(); b1 = time.time()
                 loss = _unroll_chain_loss_accel(
-                    model, batch, multistep=multistep, Wall=Wall, h=h,
+                    model, batch, multistep=_K_now, Wall=Wall, h=h,
                     x_mean=x_mean_gpu, x_std=x_std_gpu, e_mean=e_mean_gpu, e_std=e_std_gpu,
                     acc_mean=acc_mean_gpu, acc_std=acc_std_gpu, use_wind=use_wind,
                 )
@@ -969,12 +987,17 @@ def train_gnn(Wall,
             val_loss_values.append(float(avg_val_loss))
 
  
-            if avg_val_loss < best_val_loss:
+            best_eligible = (multistep <= 1) or (curriculum_epochs == 0) or (_K_now == multistep)
+            if avg_val_loss < best_val_loss and best_eligible:
                 best_val_loss = float(avg_val_loss)
                 best_val_epoch = epoch_num
                 best_model_path = os.path.splitext(save_model_path)[0] + "_best_model.pt"
                 torch.save(model.state_dict(), best_model_path)
                 print(f"Best model saved to {best_model_path} at epoch {best_val_epoch}")
+            elif avg_val_loss < best_val_loss:
+                print(f"  (val {avg_val_loss:.6f} beats best, but curriculum K={_K_now} "
+                      f"< final K={multistep} -- not saved)")
+                
  
             print(f"Epoch {epoch+1}/{epochs} | "
                 f"Train Loss: {avg_train_loss:.9f} | "
