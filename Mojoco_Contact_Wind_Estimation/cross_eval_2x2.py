@@ -139,7 +139,7 @@ for mname in MODELS:
     row = f"{mname:<16}"
     for dname in DATASETS:
         c, a, n = cell_stats(results[(mname, dname)])
-        row += f"{c + ' | ' + a:>28}"
+        row += f"{c + ' | ' + a:>28}   "
     print(row)
 
 # ---- paired decompositions ----

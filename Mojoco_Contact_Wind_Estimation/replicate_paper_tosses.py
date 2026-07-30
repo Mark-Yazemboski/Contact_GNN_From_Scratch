@@ -44,7 +44,7 @@ from evaluate_metrics import compute_phase_boundaries, BLOCK_WIDTH
 script_dir   = os.path.dirname(os.path.abspath(__file__))
 PAPER_FOLDER = os.path.join(script_dir, "data/tosses_processed")
 INDICES      = range(0, 569)
-OUT_NAME     = "mojoco_paper_replica"
+OUT_NAME     = "mojoco_paper_replica_20_wind"
 OUT_DIR      = os.path.join(script_dir, "data", OUT_NAME)
 XML_PATH     = os.path.join(script_dir, "cube.xml")
 
@@ -66,13 +66,18 @@ SOLREF_TIME = 0.02
 MIN_AIRBORNE_FIT = 5            # frames needed for the launch fits
 MASS = 0.37
 
+WIND_RANGE     = (0.0, 20.0)      # uniform |wind| range, horizontal (m/s)
+FIX_WIND_DIR   = False
+WIND_DIR_FIXED = (1.0, 0.0, 0.0)
+MEASURE_WIND_EFFECT = True       # also sim a no-wind twin per traj, report deviation
+WIND_ON = WIND_RANGE[1] > 0
+
 # ======================================================================
 # Model setup with loud receipts
 # ======================================================================
 model = mujoco.MjModel.from_xml_path(XML_PATH)
 model.opt.gravity[:]      = [0.0, 0.0, -GRAVITY]
 model.opt.timestep        = DT / SUBSTEPS
-model.opt.wind[:]         = 0.0
 model.opt.cone            = (mujoco.mjtCone.mjCONE_ELLIPTIC if CONE == "elliptic"
                              else mujoco.mjtCone.mjCONE_PYRAMIDAL)
 model.geom_friction[:, 0] = MU
@@ -147,7 +152,8 @@ def extract_ics(states):
 # ======================================================================
 # Simulation (records frame 0 BEFORE stepping -> exact frame alignment)
 # ======================================================================
-def simulate_replica(pos0, quat0_wxyz, v0, w_body, T):
+def simulate_replica(pos0, quat0_wxyz, v0, w_body, T,wind=np.zeros(3)):
+    model.opt.wind[:] = wind
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data)
     data.qpos[:3]  = pos0
@@ -163,6 +169,15 @@ def simulate_replica(pos0, quat0_wxyz, v0, w_body, T):
         states.append(np.concatenate([data.qpos[:3].copy(), data.qpos[3:7].copy()]))
     return np.stack(states)
 
+def sample_wind():
+    if not WIND_ON:
+        return np.zeros(3)
+    if FIX_WIND_DIR:
+        d = np.array(WIND_DIR_FIXED, float); d[2] = 0.0
+    else:
+        d = np.random.randn(3); d[2] = 0.0
+    d /= (np.linalg.norm(d) + 1e-8)
+    return d * np.random.uniform(*WIND_RANGE)
 
 # ======================================================================
 # Pair comparison helpers
@@ -212,7 +227,12 @@ for n_done, idx in enumerate(INDICES, 1):
         continue
 
     pos0, quat0, v0, w_body, w_world, tc_r, ts_r, quality = extract_ics(states_real)
-    twin = simulate_replica(pos0, quat0, v0, w_body, T)
+    wind = sample_wind()
+    twin = simulate_replica(pos0, quat0, v0, w_body, T, wind=wind)
+    if WIND_ON and MEASURE_WIND_EFFECT:
+        twin0 = simulate_replica(pos0, quat0, v0, w_body, T)      # no-wind baseline
+        path0 = float(np.linalg.norm(np.diff(twin0[:, :3], axis=0), axis=1).sum())
+        w_off = float(np.linalg.norm(twin[-1, :3] - twin0[-1, :3]))
 
     # twin phase boundaries (same detector, same node geometry)
     twin_t = torch.tensor(twin, dtype=torch.float32)
@@ -228,19 +248,37 @@ for n_done, idx in enumerate(INDICES, 1):
     s_real = contact_stats(states_real.numpy(), tc_r, ts_r)
     s_twin = contact_stats(twin, tc_t, ts_t)
     rest_offset = float(np.linalg.norm(s_real["rest_xy"] - s_twin["rest_xy"])) / BLOCK_WIDTH
+    if not WIND_ON:
+        rows.append(dict(
+            idx=idx, T=T, quality=quality,
+            v0=float(np.linalg.norm(v0)), w0=float(np.linalg.norm(w_world)),
+            tc_real=tc_r, tc_twin=tc_t, dtc=tc_t - tc_r,
+            air_com_dev_mm=float(com_dev.max() * 1000.0),
+            air_ang_dev_deg=float(ang_dev.max()),
+            contact_frames_real=s_real["contact_frames"],
+            contact_frames_twin=s_twin["contact_frames"],
+            stop_dist_real=s_real["stop_dist"], stop_dist_twin=s_twin["stop_dist"],
+            e_z_real=s_real["e_z"], e_z_twin=s_twin["e_z"],
+            rest_offset_w=rest_offset,
+        ))
+    else:
+        rows.append(dict(
+                    idx=idx, T=T, quality=quality,
+                    v0=float(np.linalg.norm(v0)), w0=float(np.linalg.norm(w_world)),
+                    tc_real=tc_r, tc_twin=tc_t, dtc=tc_t - tc_r,
+                    air_com_dev_mm=float(com_dev.max() * 1000.0),
+                    air_ang_dev_deg=float(ang_dev.max()),
+                    contact_frames_real=s_real["contact_frames"],
+                    contact_frames_twin=s_twin["contact_frames"],
+                    stop_dist_real=s_real["stop_dist"], stop_dist_twin=s_twin["stop_dist"],
+                    e_z_real=s_real["e_z"], e_z_twin=s_twin["e_z"],
+                    rest_offset_w=rest_offset,
+                    wind_mag=float(np.linalg.norm(wind)),
+                    wind_offset_m=w_off, 
+                    wind_offset_w=w_off/BLOCK_WIDTH, 
+                    wind_offset_pct=100*w_off/(path0+1e-9),
+                ))
 
-    rows.append(dict(
-        idx=idx, T=T, quality=quality,
-        v0=float(np.linalg.norm(v0)), w0=float(np.linalg.norm(w_world)),
-        tc_real=tc_r, tc_twin=tc_t, dtc=tc_t - tc_r,
-        air_com_dev_mm=float(com_dev.max() * 1000.0),
-        air_ang_dev_deg=float(ang_dev.max()),
-        contact_frames_real=s_real["contact_frames"],
-        contact_frames_twin=s_twin["contact_frames"],
-        stop_dist_real=s_real["stop_dist"], stop_dist_twin=s_twin["stop_dist"],
-        e_z_real=s_real["e_z"], e_z_twin=s_twin["e_z"],
-        rest_offset_w=rest_offset,
-    ))
 
     # --- save twin in the standard training format ---
     params = dict(wind=np.zeros(3), pos=pos0, quat=quat0, vel=v0,
