@@ -44,7 +44,7 @@ from evaluate_metrics import compute_phase_boundaries, BLOCK_WIDTH
 script_dir   = os.path.dirname(os.path.abspath(__file__))
 PAPER_FOLDER = os.path.join(script_dir, "data/tosses_processed")
 INDICES      = range(0, 569)
-OUT_NAME     = "mojoco_paper_replica_20_wind"
+OUT_NAME     = "mojoco_paper_replica_0_wind"
 OUT_DIR      = os.path.join(script_dir, "data", OUT_NAME)
 XML_PATH     = os.path.join(script_dir, "cube.xml")
 
@@ -66,7 +66,7 @@ SOLREF_TIME = 0.02
 MIN_AIRBORNE_FIT = 5            # frames needed for the launch fits
 MASS = 0.37
 
-WIND_RANGE     = (0.0, 20.0)      # uniform |wind| range, horizontal (m/s)
+WIND_RANGE     = (0.0, 0)      # uniform |wind| range, horizontal (m/s)
 FIX_WIND_DIR   = False
 WIND_DIR_FIXED = (1.0, 0.0, 0.0)
 MEASURE_WIND_EFFECT = True       # also sim a no-wind twin per traj, report deviation
@@ -281,13 +281,13 @@ for n_done, idx in enumerate(INDICES, 1):
 
 
     # --- save twin in the standard training format ---
-    params = dict(wind=np.zeros(3), pos=pos0, quat=quat0, vel=v0,
+    params = dict(wind=wind, pos=pos0, quat=quat0, vel=v0,
                   angvel=w_world, mass=MASS, type="toss",
                   source_idx=idx, ic_quality=quality,
                   replica_physics=dict(mu=MU, g=GRAVITY, cone=CONE,
                                        solref=[SOLREF_TIME, SOLREF_DAMP]))
     torch.save([torch.tensor(twin, dtype=torch.float32),
-                torch.zeros(3), MASS, params],
+                torch.tensor(wind, dtype=torch.float32), MASS, params],
                os.path.join(OUT_DIR, f"{idx}.pt"))
 
     if n_done % 50 == 0:
