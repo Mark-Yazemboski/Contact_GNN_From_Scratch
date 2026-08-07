@@ -187,8 +187,10 @@ def compute_phase_boundaries(true_positions,
 
     t_settle = T
     below = speed < settle_speed_thresh
-    for t in range(min(t_contact, len(speed)), len(speed) - settle_run + 1):
-        if bool(below[t:t + settle_run].all()):
+    start = min(t_contact, len(speed))
+    for t in range(start, len(speed) - settle_run + 1):
+        if (bool(below[t:t + settle_run].all())
+                and bool((speed[t:] < 2.0 * settle_speed_thresh).all())):   # and STAYS slow
             t_settle = t
             break
     return t_contact, t_settle
