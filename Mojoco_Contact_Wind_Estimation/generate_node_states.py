@@ -187,8 +187,6 @@ def get_gns_features(Wall, throw_number, nodes_per_edge=2, nearest_neighbors=4, 
     else:
         unscaled_states = states
 
-    if use_wind and torch.allclose(wind_vector, torch.zeros(3)):
-        raise ValueError(f"use_wind=True but wind is zero for trajectory {throw_number}")
 
     #Gets the number of timesteps in the trajectory
     T = unscaled_states.shape[0]
