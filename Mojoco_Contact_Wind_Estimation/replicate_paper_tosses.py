@@ -34,6 +34,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 
+# Shared ground-truth wrench bookkeeping, defined once in capture_mojoco_traj.py
+# so both generators write identical label schemas. Importing that module is
+# safe - its dataset-generation code is under `if __name__ == "__main__"`.
+from capture_mojoco_traj import (ContactFrameSelector, new_wrench_interval,
+                                 accumulate_substep_wrench, verify_wrench,
+                                 make_wrench_save_dict)
+
 from generate_node_states import (mesh_cube_surface, quat_to_rotmat,
                                   unscale_position_velocity, BLOCK_HALF_WIDTH)
 from evaluate_metrics import compute_phase_boundaries, BLOCK_WIDTH
@@ -50,6 +57,11 @@ XML_PATH     = os.path.join(script_dir, "cube.xml")
 
 DT       = 1.0 / 148.0          # recorded frame time of the paper data
 SUBSTEPS = 50
+
+# Record MuJoCo's true contact/fluid wrenches alongside each replica. Costs a
+# few % of generation time and removes the need for a separate
+# add_wrench_labels.py pass. Labels are validation-only - never trained on.
+RECORD_WRENCH = True
 
 # --- physics (overridden in code regardless of what cube.xml says) ---
 MATCH_DATA_UNITS = True
@@ -152,7 +164,21 @@ def extract_ics(states):
 # ======================================================================
 # Simulation (records frame 0 BEFORE stepping -> exact frame alignment)
 # ======================================================================
-def simulate_replica(pos0, quat0_wxyz, v0, w_body, T,wind=np.zeros(3)):
+def simulate_replica(pos0, quat0_wxyz, v0, w_body, T, wind=np.zeros(3),
+                     record_wrench=False):
+    """Returns (states, wrench).  wrench is None unless record_wrench=True.
+
+    MuJoCo already computes the true contact and fluid forces while stepping;
+    recording them here means the dataset ships with its own force labels and
+    no separate re-simulation pass is needed. Accumulated at SUBSTEP resolution
+    because an impact spike lives entirely inside the SUBSTEPS between recorded
+    frames - sampling qfrc at frame boundaries would alias it away.
+
+    ALIGNMENT: this generator records frame 0 BEFORE stepping, so substep block
+    i is exactly the transition frame i -> frame i+1 and every block labels an
+    interval (T-1 of them). Labels are VALIDATION ONLY; the force model is
+    never trained on them.
+    """
     model.opt.wind[:] = wind
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data)
@@ -163,11 +189,37 @@ def simulate_replica(pos0, quat0_wxyz, v0, w_body, T,wind=np.zeros(3)):
     mujoco.mj_forward(model, data)
 
     states = [np.concatenate([data.qpos[:3].copy(), data.qpos[3:7].copy()])]
+    qvel_lin = [data.qvel[:3].copy()]
+    qvel_ang_body = [data.qvel[3:6].copy()]
+    intervals = []
+    selector = ContactFrameSelector()
+    dt = model.opt.timestep
+
     for _ in range(T - 1):
+        acc = new_wrench_interval() if record_wrench else None
         for _ in range(SUBSTEPS):
             mujoco.mj_step(model, data)
+            if record_wrench:
+                accumulate_substep_wrench(model, data, acc, dt, selector)
         states.append(np.concatenate([data.qpos[:3].copy(), data.qpos[3:7].copy()]))
-    return np.stack(states)
+        if record_wrench:
+            intervals.append(acc)
+            qvel_lin.append(data.qvel[:3].copy())
+            qvel_ang_body.append(data.qvel[3:6].copy())
+
+    states_np = np.stack(states)
+    if not record_wrench:
+        return states_np, None
+
+    stack = lambda key: np.stack([iv[key] for iv in intervals])
+    wrench = dict(
+        J_contact=stack("Jc"), J_fluid=stack("Jf"),
+        tau_contact=stack("Tc"), tau_contact_qfrc=stack("Tc_q"),
+        tau_fluid=stack("Tf"),
+        qvel_lin=np.stack(qvel_lin), qvel_ang_body=np.stack(qvel_ang_body),
+        contact_xcheck=selector.max_residual,
+    )
+    return states_np, wrench
 
 def sample_wind():
     if not WIND_ON:
@@ -215,6 +267,7 @@ def contact_stats(states_np, tc, ts):
 # ======================================================================
 os.makedirs(OUT_DIR, exist_ok=True)
 rows = []
+wrench_verif = []
 
 for n_done, idx in enumerate(INDICES, 1):
     try:
@@ -228,9 +281,10 @@ for n_done, idx in enumerate(INDICES, 1):
 
     pos0, quat0, v0, w_body, w_world, tc_r, ts_r, quality = extract_ics(states_real)
     wind = sample_wind()
-    twin = simulate_replica(pos0, quat0, v0, w_body, T, wind=wind)
+    twin, twin_wrench = simulate_replica(pos0, quat0, v0, w_body, T,
+                                         wind=wind, record_wrench=RECORD_WRENCH)
     if WIND_ON and MEASURE_WIND_EFFECT:
-        twin0 = simulate_replica(pos0, quat0, v0, w_body, T)      # no-wind baseline
+        twin0, _ = simulate_replica(pos0, quat0, v0, w_body, T)   # no-wind baseline
         path0 = float(np.linalg.norm(np.diff(twin0[:, :3], axis=0), axis=1).sum())
         w_off = float(np.linalg.norm(twin[-1, :3] - twin0[-1, :3]))
 
@@ -286,9 +340,34 @@ for n_done, idx in enumerate(INDICES, 1):
                   source_idx=idx, ic_quality=quality,
                   replica_physics=dict(mu=MU, g=GRAVITY, cone=CONE,
                                        solref=[SOLREF_TIME, SOLREF_DAMP]))
-    torch.save([torch.tensor(twin, dtype=torch.float32),
-                torch.tensor(wind, dtype=torch.float32), MASS, params],
-               os.path.join(OUT_DIR, f"{idx}.pt"))
+    save_data = [torch.tensor(twin, dtype=torch.float32),
+                 torch.tensor(wind, dtype=torch.float32), MASS, params]
+
+    if twin_wrench is not None:
+        dt_record = model.opt.timestep * SUBSTEPS
+        v = verify_wrench(twin_wrench["qvel_lin"], twin_wrench, MASS,
+                          model.opt.gravity.copy(), dt_record)
+        wrench_verif.append(v)
+        save_data.append(make_wrench_save_dict(
+            twin_wrench, dt_record, SUBSTEPS,
+            verification=dict(momentum_resid_rel=v["rel_max"],
+                              momentum_resid_air=v["rel_max_air"],
+                              momentum_resid_contact=v["rel_max_contact"],
+                              contact_xcheck=twin_wrench["contact_xcheck"])))
+        if len(wrench_verif) == 1:
+            print("\n  --- wrench label diagnostics (first replica) ---")
+            print(f"  integrator={model.opt.integrator}  cone={model.opt.cone}  "
+                  f"timestep={model.opt.timestep:.3e}  dt_record={dt_record:.6f}")
+            print(f"  per-frame gravity impulse = {v['grav_imp']:.6f} N*s")
+            print(f"  momentum residual (% of that): max {100*v['rel_max']:.4f}%  "
+                  f"| airborne {100*v['rel_max_air']:.4f}%  "
+                  f"| contact {100*v['rel_max_contact']:.4f}%")
+            print(f"  mean residual vector = {v['mean_resid']} N*s")
+            print(f"     (systematic bias along one axis = missing force term;")
+            print(f"      zero-mean scatter = integrator round-off, harmless)")
+            print(f"  contact-frame cross-check = {twin_wrench['contact_xcheck']:.3e} N\n")
+
+    torch.save(save_data, os.path.join(OUT_DIR, f"{idx}.pt"))
 
     if n_done % 50 == 0:
         print(f"  replicated {n_done} trajectories...", flush=True)
@@ -352,4 +431,16 @@ for ax, (key, label, twin_key) in zip(axes.flat, panels):
 fig.suptitle(f"Paper vs MuJoCo twin - {OUT_NAME}")
 fig.tight_layout()
 fig.savefig(os.path.join(script_dir, f"replica_{OUT_NAME}_report.png"), dpi=150)
+if wrench_verif:
+    rel = np.array([v["rel_max"] for v in wrench_verif])
+    air = np.array([v["rel_max_air"] for v in wrench_verif])
+    con = np.array([v["rel_max_contact"] for v in wrench_verif])
+    print(f"\nWrench labels written for all {len(wrench_verif)} replicas.")
+    print(f"  Momentum identity (% of per-frame gravity impulse):")
+    print(f"     overall  median {100*np.median(rel):.4f}%   max {100*rel.max():.4f}%")
+    print(f"     airborne median {100*np.median(air):.4f}%   max {100*air.max():.4f}%")
+    print(f"     contact  median {100*np.median(con):.4f}%   max {100*con.max():.4f}%")
+    print(f"  Under ~1% is bookkeeping-clean; a real frame/sign/alignment bug"
+          f" shows up near 100%.")
+
 print(f"\nSaved twins to {OUT_DIR}/, CSV + report PNG next to this script.")

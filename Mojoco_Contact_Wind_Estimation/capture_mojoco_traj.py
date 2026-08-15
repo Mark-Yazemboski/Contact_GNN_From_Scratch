@@ -7,6 +7,113 @@ from scipy.spatial.transform import Rotation
 import time
 
 
+# ======================================================================
+# GROUND-TRUTH WRENCH CAPTURE
+# ----------------------------------------------------------------------
+# MuJoCo already computes the true contact and fluid forces while stepping;
+# it just does not save them. We record them here, inline, so the dataset
+# carries its own force labels and no separate re-simulation pass is needed.
+#
+# Accumulated at SUBSTEP resolution: an impact spike lives entirely inside the
+# `substeps` between recorded frames, so sampling qfrc only at frames would
+# alias it away. We sum force * dt over each recorded interval, giving the
+# IMPULSE over frame t -> t+1 - precisely the quantity conjugate to the
+# per-step velocity change the force model predicts.
+#
+# These labels are for VALIDATION ONLY. The force GNN is never shown them;
+# that is what lets us claim it recovered the contact/fluid split from motion
+# alone.
+# ======================================================================
+
+class ContactFrameSelector:
+    """mj_contactForce returns forces in the CONTACT frame. Which orientation
+    maps them to world (frame^T vs frame) is settled empirically on the first
+    contact by matching their sum against qfrc_constraint[0:3], which is
+    unambiguous. The residual of that match is reported as a cross-check."""
+
+    def __init__(self):
+        self.use_transpose = None
+        self.max_residual = 0.0
+
+    def world_forces(self, model, data):
+        if data.ncon == 0:
+            return [], []
+        f6 = np.zeros(6)
+        cand, points = [], []
+        for i in range(data.ncon):
+            mujoco.mj_contactForce(model, data, i, f6)
+            F = f6[:3].copy()
+            Rc = data.contact[i].frame.reshape(3, 3)
+            cand.append((Rc.T @ F, Rc @ F))
+            points.append(data.contact[i].pos.copy())
+        target = data.qfrc_constraint[:3].copy()
+        if self.use_transpose is None:
+            s_t = sum(c[0] for c in cand)
+            s_n = sum(c[1] for c in cand)
+            self.use_transpose = (np.linalg.norm(s_t - target)
+                                  <= np.linalg.norm(s_n - target))
+        chosen = [c[0] if self.use_transpose else c[1] for c in cand]
+        self.max_residual = max(self.max_residual,
+                                float(np.linalg.norm(sum(chosen) - target)))
+        return chosen, points
+
+
+def new_wrench_interval():
+    return dict(Jc=np.zeros(3), Jf=np.zeros(3), Tc=np.zeros(3),
+                Tc_q=np.zeros(3), Tf=np.zeros(3))
+
+
+def accumulate_substep_wrench(model, data, acc, dt, selector):
+    """Add one substep's worth of impulse to the current recorded interval.
+    free-joint qvel[3:6] is BODY-frame angular velocity, so the generalized
+    angular forces are BODY-frame torques and are rotated to world with R(t)."""
+    R = Rotation.from_quat(data.qpos[3:7][[1, 2, 3, 0]]).as_matrix()
+    com = data.xipos[1].copy()
+    acc["Jc"] += data.qfrc_constraint[:3] * dt
+    acc["Jf"] += data.qfrc_passive[:3] * dt
+    acc["Tc_q"] += (R @ data.qfrc_constraint[3:6]) * dt
+    acc["Tf"] += (R @ data.qfrc_passive[3:6]) * dt
+    fw, pts = selector.world_forces(model, data)
+    for F, p in zip(fw, pts):
+        acc["Tc"] += np.cross(p - com, F) * dt
+
+
+def make_wrench_save_dict(wrench, dt_record, substeps, verification):
+    """Element [4] of a saved trajectory. Shared by capture_mojoco_traj.py and
+    replicate_paper_tosses.py so both datasets carry byte-identical label
+    schemas and evaluate_force_model.py reads either without special cases."""
+    t = lambda a: torch.tensor(a, dtype=torch.float32)
+    return dict(
+        J_contact=t(wrench["J_contact"]), J_fluid=t(wrench["J_fluid"]),
+        tau_contact=t(wrench["tau_contact"]),
+        tau_contact_qfrc=t(wrench["tau_contact_qfrc"]),
+        tau_fluid=t(wrench["tau_fluid"]),
+        qvel_lin=t(wrench["qvel_lin"]), qvel_ang_body=t(wrench["qvel_ang_body"]),
+        dt_record=dt_record, substeps=substeps,
+        convention=("J*/tau* are impulses over recorded interval t->t+1, world "
+                    "frame, torque about the body COM. J[t] pairs with the model "
+                    "prediction whose input window ends at frame t."),
+        verification=verification,
+    )
+
+
+def verify_wrench(qvel_lin, wrench, mass, g_vec, dt_record):
+    """Momentum identity m*dv = m*g*DT + J_contact + J_fluid. This checks OUR
+    BOOKKEEPING, not MuJoCo's physics: a wrong array, sign, frame, or substep
+    alignment breaks it by ~100%, while integrator details leave ~0.01%.
+    Returned residual is RELATIVE to the per-frame gravity impulse."""
+    dv = mass * (qvel_lin[1:] - qvel_lin[:-1])
+    grav = mass * g_vec * dt_record
+    resid = dv - (grav + wrench["J_contact"] + wrench["J_fluid"])
+    grav_imp = float(np.linalg.norm(mass * g_vec * dt_record)) or 1.0
+    rel = np.linalg.norm(resid, axis=1) / grav_imp
+    contact = np.linalg.norm(wrench["J_contact"], axis=1) > 1e-12
+    return dict(rel_max=float(rel.max()), rel_mean=float(rel.mean()),
+                rel_max_air=float(rel[~contact].max()) if (~contact).any() else 0.0,
+                rel_max_contact=float(rel[contact].max()) if contact.any() else 0.0,
+                mean_resid=resid.mean(axis=0), grav_imp=grav_imp)
+
+
 #This file will generate all of the training data we will use to train the contact and fluid GNN. Using mojoco's built in
 # physics engine, it will simulate the trajectory of a cube under the influence of different wind vectors, initial positions,
 #orientations, velocities, and angular velocities. The trajectories are saved as .pt files, which contain the trajectory data 
@@ -21,7 +128,8 @@ def random_quat():
 #Takes in the initial conditions and parameters for a MuJoCo simulation, runs the simulation for a specified number of steps, 
 #and returns the trajectory of the cube's position and orientation over time.
 def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_vel,
-                       initial_angvel, mass, n_steps=1000,substeps= 10, visualize=False):
+                       initial_angvel, mass, n_steps=1000,substeps= 10, visualize=False,
+                       record_wrench=True):
     
     #Loads the model into MuJoCo, sets the initial conditions and parameters and resets the simulation data.
     data = mujoco.MjData(model)
@@ -37,20 +145,43 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
     mujoco.mj_forward(model, data)
 
     states = []
+    qvel_lin, qvel_ang_body = [], []
+    intervals = []
+    selector = ContactFrameSelector()
+    dt = model.opt.timestep
+
+    def _record_frame():
+        states.append(np.concatenate([
+            data.qpos[:3].copy(),
+            data.qpos[3:7].copy(),
+        ]))
+        if record_wrench:
+            qvel_lin.append(data.qvel[:3].copy())
+            qvel_ang_body.append(data.qvel[3:6].copy())
+
+    def _run_block():
+        """One recorded interval = `substeps` physics steps, with the contact
+        and fluid impulses accumulated across all of them."""
+        acc = new_wrench_interval() if record_wrench else None
+        for _ in range(substeps):
+            mujoco.mj_step(model, data)
+            if record_wrench:
+                accumulate_substep_wrench(model, data, acc, dt, selector)
+        return acc
 
     #If visualize is True, it will launch the MuJoCo viewer and step through the simulation, 
     #rendering the cube's motion
     if visualize:
         with mujoco.viewer.launch_passive(model, data) as viewer:
             time.sleep(10)  # wait for viewer to initialize
-            for _ in range(n_steps):
+            for i in range(n_steps):
                 # Take multiple small physics steps per recorded frame
-                for _ in range(substeps):
-                    mujoco.mj_step(model, data)
-                states.append(np.concatenate([
-                    data.qpos[:3].copy(),
-                    data.qpos[3:7].copy(),
-                ]))
+                acc = _run_block()
+                # The first block precedes frame 0, so it labels no interval.
+                # Every later block is the transition frame i-1 -> frame i.
+                if record_wrench and i > 0:
+                    intervals.append(acc)
+                _record_frame()
                 viewer.sync()
                 time.sleep(.05)
             # Keep window open after sim finishes
@@ -58,16 +189,26 @@ def collect_trajectory(model, wind_vector, initial_pos, initial_quat, initial_ve
     
     #If not visualizing, it will just run the simulation and record the trajectory data without rendering.
     else:
-        for _ in range(n_steps):
-            for _ in range(substeps):
-                    mujoco.mj_step(model, data)
-            states.append(np.concatenate([
-                data.qpos[:3].copy(),
-                data.qpos[3:7].copy(),
-            ]))
+        for i in range(n_steps):
+            acc = _run_block()
+            if record_wrench and i > 0:
+                intervals.append(acc)
+            _record_frame()
 
     trajectory = np.stack(states)
-    return trajectory
+
+    if not record_wrench:
+        return trajectory, None
+
+    stack = lambda key: np.stack([iv[key] for iv in intervals])
+    wrench = dict(
+        J_contact=stack("Jc"), J_fluid=stack("Jf"),
+        tau_contact=stack("Tc"), tau_contact_qfrc=stack("Tc_q"),
+        tau_fluid=stack("Tf"),
+        qvel_lin=np.stack(qvel_lin), qvel_ang_body=np.stack(qvel_ang_body),
+        contact_xcheck=selector.max_residual,
+    )
+    return trajectory, wrench
 
 def generate_paper_matched_toss(mass):
     pos = np.array([np.random.uniform(-0.2, 0.2),
@@ -174,6 +315,11 @@ if __name__ == "__main__":
 
     #----- Dataset parameters -----
 
+    # Record MuJoCo's true contact/fluid wrenches alongside each trajectory.
+    # Costs a few % of generation time and removes the need for a separate
+    # add_wrench_labels.py pass. Labels are validation-only - never trained on.
+    RECORD_WRENCH = True
+
     Match_paper_traj = True
 
     n_trajectories = 570
@@ -219,6 +365,8 @@ if __name__ == "__main__":
 
     print(f"Total: {n_trajectories} | Toss: {n_toss} | Sliding: {n_sliding} ({sliding_percentage*100:.0f}%)")
 
+    verif_stats = []
+
     for i in range(n_trajectories):
         if not Match_paper_traj:
             if i in sliding_indices:
@@ -249,7 +397,7 @@ if __name__ == "__main__":
               f"vel={params['vel'].round(3)}, "
               f"angvel={params['angvel'].round(3)}")
 
-        traj = collect_trajectory(
+        traj, wrench = collect_trajectory(
             model=model,
             wind_vector=params['wind'],
             initial_pos=params['pos'],
@@ -259,7 +407,8 @@ if __name__ == "__main__":
             mass=params['mass'],
             n_steps=n_steps,
             substeps=substeps,
-            visualize=True if i == 0 and visualize_first else False
+            visualize=True if i == 0 and visualize_first else False,
+            record_wrench=RECORD_WRENCH,
         )
 
         traj_tensor = torch.tensor(traj, dtype=torch.float32)
@@ -270,9 +419,48 @@ if __name__ == "__main__":
             params,
         ]
 
+        if wrench is not None:
+            dt_record = model.opt.timestep * substeps
+            v = verify_wrench(wrench["qvel_lin"], wrench, params['mass'],
+                              model.opt.gravity.copy(), dt_record)
+            verif_stats.append(v)
+            # Element [4]: same schema add_wrench_labels.py produced, so
+            # evaluate_force_model.py reads these files unchanged.
+            save_data.append(make_wrench_save_dict(
+                wrench, dt_record, substeps,
+                verification=dict(momentum_resid_rel=v["rel_max"],
+                                  momentum_resid_air=v["rel_max_air"],
+                                  momentum_resid_contact=v["rel_max_contact"],
+                                  contact_xcheck=wrench["contact_xcheck"])))
+
+            if i == 0:
+                print("\n  --- wrench label diagnostics (trajectory 0) ---")
+                print(f"  integrator={model.opt.integrator}  cone={model.opt.cone}  "
+                      f"timestep={model.opt.timestep:.3e}  dt_record={dt_record:.6f}")
+                print(f"  per-frame gravity impulse = {v['grav_imp']:.6f} N*s")
+                print(f"  momentum residual (% of that): max {100*v['rel_max']:.4f}%  "
+                      f"| airborne {100*v['rel_max_air']:.4f}%  "
+                      f"| contact {100*v['rel_max_contact']:.4f}%")
+                print(f"  mean residual vector = {v['mean_resid']} N*s")
+                print(f"     (systematic bias along one axis = missing force term;")
+                print(f"      zero-mean scatter = integrator round-off, harmless)")
+                print(f"  contact-frame cross-check = {wrench['contact_xcheck']:.3e} N\n")
+
         save_path = os.path.join(save_dir, f"{i}.pt")
         torch.save(save_data, save_path)
         print(f"Saved trajectory {i}")
     
     print(f"\nSaved {n_trajectories} trajectories to {save_dir}/")
     print(f"  Toss: {n_toss} | Sliding: {n_sliding}")
+
+    if verif_stats:
+        rel = np.array([v["rel_max"] for v in verif_stats])
+        air = np.array([v["rel_max_air"] for v in verif_stats])
+        con = np.array([v["rel_max_contact"] for v in verif_stats])
+        print(f"\n  Wrench labels written for all {len(verif_stats)} trajectories.")
+        print(f"  Momentum identity (% of per-frame gravity impulse):")
+        print(f"     overall  median {100*np.median(rel):.4f}%   max {100*rel.max():.4f}%")
+        print(f"     airborne median {100*np.median(air):.4f}%   max {100*air.max():.4f}%")
+        print(f"     contact  median {100*np.median(con):.4f}%   max {100*con.max():.4f}%")
+        print(f"  Anything under ~1% is bookkeeping-clean; a real frame/sign bug"
+              f" shows up near 100%.")

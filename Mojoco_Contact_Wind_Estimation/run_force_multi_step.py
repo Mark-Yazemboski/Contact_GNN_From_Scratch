@@ -22,6 +22,9 @@ import os
 import torch
 import wall
 from train_force_gns import train_force_gnn
+from evaluate_force_model import evaluate_force_model
+from visualize_force_model import visualize_force_rollout
+from run_report import save_run_report
 from generate_node_states import BLOCK_HALF_WIDTH
 
 torch.set_float32_matmul_precision('high')
@@ -35,7 +38,7 @@ Floor = wall.wall(center_position=(0, 0, 0), size=(2, 2), normal=(0, 0, 1))
 
 # Point this at a *_wrench folder once add_wrench_labels.py has run, so the
 # same files carry ground-truth wrenches for evaluate_force_model.py.
-trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_0_wind")
+trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_20_wind")
 
 Num_total_trajectories = 569
 training_percentage = 0.5
@@ -66,7 +69,7 @@ pos_history = 3
 
 batch_size = 512
 learning_rate = 1e-4
-epochs = 400
+epochs = 100
 noise_scale = 3e-4 * BLOCK_HALF_WIDTH            # meters/step, same as accel runs
 rot_noise_scale = None                           # None -> noise_scale / half_width (rad)
 
@@ -94,7 +97,7 @@ DT = 1.0 / 148.0        # replica record rate. NOTE: generate_node_states.DT_REC
 GRAVITY = None          # None -> read from replica_physics in the data (9.615)
 MASS = 0.37
 
-use_wind_feature = False        # Stage 1: off. Stage 2+: on for wind datasets.
+use_wind_feature = True        # Stage 1: off. Stage 2+: on for wind datasets.
 use_drag_baseline = False       # Stage 2: True (analytic drag at COM, calibrated k/m)
 K_OVER_M = 0.0285               # from wind_error_analysis.py drag calibration
 
@@ -116,13 +119,28 @@ w_fluid_reg = 0.0    # L2 on the raw fluid-head outputs (keep residual small)
 # ----------------------------------------------------------------------
 # Naming / paths
 # ----------------------------------------------------------------------
-extra_name = "force_stage1"      # CHANGE PER EXPERIMENT
+extra_name = "force_stage1_20wind"      # CHANGE PER EXPERIMENT
 model_folder_path = os.path.join(script_dir, "models", extra_name)
 os.makedirs(model_folder_path, exist_ok=True)
 save_model_path = os.path.join(
     model_folder_path, f"{Used_Num_train_trajectories}_force_gns_model.pt")
 
+# Everything runs from this one file so a single batch job on ROAR trains,
+# evaluates, and renders the GIFs without a second submission.
 Train_model = True
+Evaluate_model = True
+Visualize_model = True
+
+# Which test trajectories to render as GIFs. Keep this short - each one is a
+# full rollout plus a matplotlib animation, so ~10-30 s apiece.
+VISUALIZE_TRAJECTORIES = [test_range[0], test_range[len(test_range) // 2]]
+VISUALIZE_SHOW = False          # False on a compute node (no display)
+
+# One canonical row per force run, kept in its OWN master file so the force
+# architecture's numbers never get mixed into the acceleration model's
+# all_runs_master.csv. Opens directly in Excel.
+Save_run_report = True
+FORCE_MASTER_CSV = os.path.join(script_dir, "models", "all_force_runs_master.csv")
 
 # ----------------------------------------------------------------------
 if Train_model:
@@ -164,5 +182,73 @@ if Train_model:
         epoch_checkpoint_interval=epoch_checkpoint_interval,
     )
 
-print("\nTraining done. Next:")
-print(f"  python evaluate_force_model.py   (set MODEL_FOLDER = models/{extra_name})")
+# ----------------------------------------------------------------------
+if Evaluate_model:
+    print("\n" + "#" * 70)
+    print("# EVALUATION")
+    print("#" * 70)
+    metrics = evaluate_force_model(
+        model_folder=model_folder_path,
+        data_folder=trajectory_folder,
+        test_indices=test_range,
+        weights_only=weights_only_load,
+        unscale=unscale_trajectory_data,
+    )
+    print("\nSummary:", {k: (round(v, 4) if isinstance(v, float) else v)
+                         for k, v in metrics.items()})
+
+    if Save_run_report:
+        settings = dict(
+            architecture="force",           # distinguishes these rows at a glance
+            dataset=trajectory_folder,
+            n_train=Used_Num_train_trajectories,
+            train_range=f"{train_range.start}-{train_range.stop}",
+            val_range=f"{val_range.start}-{val_range.stop}",
+            test_range=f"{test_range.start}-{test_range.stop}",
+            nodes_per_edge=nodes_per_edge,
+            nearest_neighbors=K_nearest_neighbors,
+            message_passing_layers=message_passing_layers,
+            repeat_blocks=repeat_blocks,
+            latent_dim=Latent_dimension,
+            pos_history=pos_history,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            epochs=epochs,
+            noise_scale=noise_scale,
+            rot_noise_scale=rot_noise_scale,
+            multistep=multistep,
+            curriculum_epochs=curriculum_epochs,
+            scheduler=Learning_Rate_Scheduler,
+            loss_mode=loss_mode,
+            use_wind=use_wind_feature,
+            use_drag_baseline=use_drag_baseline,
+            k_over_m=K_OVER_M,
+            contact_d0=contact_d0,
+            contact_tau=contact_tau,
+            dt=DT, gravity=GRAVITY, mass=MASS,
+            w_diss=w_diss, w_sparse=w_sparse, w_fluid_reg=w_fluid_reg,
+        )
+        save_run_report(model_folder_path, settings, metrics, slopes=[],
+                        run_name=extra_name, master_csv=FORCE_MASTER_CSV)
+
+# ----------------------------------------------------------------------
+if Visualize_model:
+    print("\n" + "#" * 70)
+    print("# VISUALIZATION")
+    print("#" * 70)
+    for traj_idx in VISUALIZE_TRAJECTORIES:
+        try:
+            out = visualize_force_rollout(
+                model_folder=model_folder_path,
+                data_folder=trajectory_folder,
+                trajectory=int(traj_idx),
+                show=VISUALIZE_SHOW,
+                weights_only=weights_only_load,
+                unscale=unscale_trajectory_data,
+            )
+            print(f"  wrote {out}")
+        except Exception as e:
+            # A failed GIF must never take down a finished training run.
+            print(f"  visualization of traj {traj_idx} FAILED: {type(e).__name__}: {e}")
+
+print("\nAll done.")
