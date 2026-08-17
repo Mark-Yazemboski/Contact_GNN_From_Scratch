@@ -27,6 +27,20 @@ from visualize_force_model import visualize_force_rollout
 from run_report import save_run_report
 from generate_node_states import BLOCK_HALF_WIDTH
 
+
+#This function will take in the number of trajectories we are training on, and the 
+#number of optimizer steps we want to hit, and some other perameters, and calculate
+#how many epochs we need to train for.
+def compute_epochs(num_trajectories, target_steps, batch_size, accumulation_steps, traj_timesteps=100, history=2):
+    usable_per_traj = traj_timesteps - history - 1
+    total_samples = num_trajectories * usable_per_traj
+    num_batches = (total_samples + batch_size - 1) // batch_size  # ceil division
+    effective_accum = min(accumulation_steps, num_batches)
+    steps_per_epoch = num_batches // effective_accum
+    steps_per_epoch = max(steps_per_epoch, 1)
+    epochs = (target_steps + steps_per_epoch - 1) // steps_per_epoch
+    return epochs
+
 torch.set_float32_matmul_precision('high')
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,14 +54,24 @@ Floor = wall.wall(center_position=(0, 0, 0), size=(2, 2), normal=(0, 0, 1))
 # same files carry ground-truth wrenches for evaluate_force_model.py.
 trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_20_wind")
 
+#This is the number of timesteps in each trajectory. 
+traj_timesteps = 200
+
 Num_total_trajectories = 569
 training_percentage = 0.5
 validation_percentage = 0.3
 
+
+
 Num_train = int(training_percentage * Num_total_trajectories)
 Num_val = int(validation_percentage * Num_total_trajectories)
 
-Used_Num_train_trajectories = Num_train          # override for data-scaling runs
+#---------------------------------------------------------------------------------------------------------
+#This is the number of training trajectories to actually use.
+# Override for experiments with smaller training sets
+Used_Num_train_trajectories = 256
+#---------------------------------------------------------------------------------------------------------
+
 
 train_range = range(0, Used_Num_train_trajectories)
 val_range = range(Num_train, Num_train + Num_val)
@@ -69,7 +93,7 @@ pos_history = 3
 
 batch_size = 512
 learning_rate = 1e-4
-epochs = 100
+steps = 1000000
 noise_scale = 3e-4 * BLOCK_HALF_WIDTH            # meters/step, same as accel runs
 rot_noise_scale = None                           # None -> noise_scale / half_width (rad)
 
@@ -84,6 +108,10 @@ epoch_checkpoint_interval = 100
 
 weights_only_load = False                        # MuJoCo-generated data
 unscale_trajectory_data = False
+
+
+epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
+
 
 # ----------------------------------------------------------------------
 # Force-model physics (the new knobs)
