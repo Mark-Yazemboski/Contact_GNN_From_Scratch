@@ -83,6 +83,13 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
     model.load_state_dict(sd)
     model.to(device).eval()
 
+    phys_path = os.path.join(MODEL_FOLDER, MODEL_PREFIX + "_physics.pt")
+    if os.path.exists(phys_path):
+        pinfo = torch.load(phys_path, map_location="cpu", weights_only=False)
+        if pinfo.get("mu_mode") == "learnable":
+            print(f"Recovered friction coefficient mu = {pinfo['recovered_mu']:.4f}"
+                  f"   (replica ground truth: 0.198)")
+
     # ======================================================================
     # Rollout the test set
     # ======================================================================

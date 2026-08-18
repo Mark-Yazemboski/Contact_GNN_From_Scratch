@@ -61,6 +61,7 @@ from force_gns import (ForceGNSModel, quat_wxyz_to_R, so3_exp, so3_log,
                        rigid_step, nodes_from_state, contact_weight,
                        assemble_contact_forces, fluid_wrench_from_raw,
                        drag_accel_step, BLOCK_WIDTH, I_OVER_M)
+from physics_losses import PhysicsLosses
 
 BLOCK_WIDTH_FOR_LOSS = BLOCK_WIDTH
 
@@ -253,7 +254,7 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
                        use_wind=False, use_drag_baseline=False, k_over_m=0.0285,
                        contact_d0=0.02, contact_tau=0.005,
                        loss_mode="accel",
-                       w_diss=0.0, w_sparse=0.0, w_fluid_reg=0.0):
+                       phys=None, phys_weights=None):
     """
     Unroll `multistep` steps: features -> contact forces + COM fluid wrench ->
     rigid step -> loss vs truth.
@@ -296,9 +297,10 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
     R_prev, R_curr = R_win[:, -2], R_win[:, -1]
     rest_b = rest_nodes.unsqueeze(0).expand(B, -1, -1)
 
-    any_phys = (w_diss > 0) or (w_sparse > 0) or (w_fluid_reg > 0)
-    raw_terms = {"diss": com_win.new_zeros(()), "sparse": com_win.new_zeros(()),
-                 "fluid_reg": com_win.new_zeros(())}
+    phys_weights = phys_weights or {}
+    any_phys = phys is not None and any(v > 0 for v in phys_weights.values())
+    raw_accum = {}
+    fluid_series = []      # total fluid accel per step, for temporal smoothness
 
     step_losses = []
     for k in range(multistep):
@@ -339,27 +341,23 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
                                 / BLOCK_WIDTH_FOR_LOSS).pow(2).mean())
 
         if any_phys:
-            if w_diss > 0:
-                # friction may not do positive work: penalize positive power of
-                # the contact-TANGENTIAL force against the node velocity. With
-                # fluid in its own COM head, the contact-tangential residual
-                # IS friction, so this statement is true - and it is what
-                # disambiguates friction from horizontal fluid force during a
-                # slide, where they are otherwise confounded.
-                v_node = pos_window[-1] - pos_window[-2]
-                v_t = v_node - (v_node * wall_n).sum(-1, keepdim=True) * wall_n
-                phi_ct = parts["phi_contact"] - \
-                    (parts["phi_contact"] * wall_n).sum(-1, keepdim=True) * wall_n
-                power = (phi_ct * v_t).sum(-1)
-                raw_terms["diss"] = raw_terms["diss"] + torch.relu(power).pow(2).mean()
-            if w_sparse > 0:
-                raw_terms["sparse"] = raw_terms["sparse"] + \
-                    parts["phi_contact"].norm(dim=-1).mean()
-            if w_fluid_reg > 0:
-                # L2 on the RAW (pre-scale) fluid-head outputs: keep the
-                # learned fluid wrench a small residual on the drag baseline.
-                raw_terms["fluid_reg"] = raw_terms["fluid_reg"] + \
-                    fluid_raw.pow(2).mean()
+            # See physics_losses.py for the full documentation of each term
+            # and the mapping to the proposal's Eq. (5).
+            v_node = pos_window[-1] - pos_window[-2]              # m/step
+            drag_target = drag_accel_step(
+                wind, (com_curr - com_prev).detach(), dt, k_over_m).detach()
+            # For the physics terms, build the fluid total with the DETACHED
+            # baseline: the terms then constrain only the fluid head, never
+            # the motion. With the baseline on, the anchor reduces exactly to
+            # "keep the learned residual small".
+            fluid_total_phys = (a_fluid + drag_target if use_drag_baseline
+                                else a_fluid)
+            fluid_series.append(fluid_total_phys)
+            step_raws = phys.compute_step_terms(
+                parts["phi_contact"], c_w, v_node, wall_n,
+                fluid_total_phys, alpha_fluid, drag_target, phys_weights)
+            for kname, v in step_raws.items():
+                raw_accum[kname] = raw_accum.get(kname, 0.0) + v
 
         pos_window = pos_window[1:] + [pred_nodes]
         com_prev, com_curr = com_curr, com_next
@@ -367,11 +365,11 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
 
     pos_loss = torch.stack(step_losses).mean()
 
-    for key in raw_terms:
-        raw_terms[key] = raw_terms[key] / multistep
-    total = (pos_loss + w_diss * raw_terms["diss"] + w_sparse * raw_terms["sparse"]
-             + w_fluid_reg * raw_terms["fluid_reg"])
-    return total, pos_loss.detach(), {k: float(v) for k, v in raw_terms.items()}
+    raw_terms = {k: v / multistep for k, v in raw_accum.items()}
+    if any_phys and phys_weights.get("w_fluid_smooth", 0) > 0:
+        raw_terms["fluid_smooth"] = phys.h_fluid_temporal_smooth(fluid_series)
+    total = pos_loss + PhysicsLosses.weighted_total(raw_terms, phys_weights)
+    return total, pos_loss.detach(), {k: float(v.detach()) for k, v in raw_terms.items()}
 
 
 # ======================================================================
@@ -547,7 +545,19 @@ def train_force_gnn(Wall,
                     contact_d0=0.02,
                     contact_tau=0.005,
                     loss_mode="accel",     # "accel" (parity) or "position"
-                    w_diss=0.0, w_sparse=0.0, w_fluid_reg=0.0,
+                    # --- physics-informed loss weights (proposal Eq. 6 gammas;
+                    #     see physics_losses.py for each term) ---
+                    w_diss=0.0,            # gamma_1: Coulomb dissipation
+                    w_sparse=0.0,          # contact sparsity (Fig. 1)
+                    w_fluid_anchor=0.0,    # gamma_3a: fluid force == analytic drag law
+                    w_fluid_torque=0.0,    # gamma_3c: fluid torque == 0
+                    w_fluid_smooth=0.0,    # gamma_3b: fluid smooth in time (K>=2)
+                    mu_init=0.2,           # friction coefficient init
+                    learn_mu=True,         # recover mu from data
+                    fix_mu=None,           # set to a float to hard-fix mu
+                    slip_v0=1e-3, slip_tau=1e-4,   # slip gate (m/step)
+                    max_steps=None,        # optimizer-step budget (paper: 1e6);
+                                           # overrides `epochs` when set
                     validation_check_interval=10,
                     epoch_checkpoint_interval=100,
                     resume_checkpoint_path=None,
@@ -577,7 +587,8 @@ def train_force_gnn(Wall,
              "_unroll_chain_loss_accel)" if loss_mode == "accel"
              else "   (position MSE in block widths)"))
     print(f"  physics-loss weights: diss={w_diss} sparse={w_sparse} "
-          f"fluid_reg={w_fluid_reg}")
+          f"fluid_anchor={w_fluid_anchor} fluid_torque={w_fluid_torque} "
+          f"fluid_smooth={w_fluid_smooth}")
     if meta:
         print(f"  replica_physics found in data: {meta}")
     print("=" * 70)
@@ -616,6 +627,24 @@ def train_force_gnn(Wall,
         # the rotation that moves a corner about as far as the COM noise does
         rot_noise_scale = noise_scale / BLOCK_HALF_WIDTH
 
+    # ---------------- physics-informed loss module ----------------
+    phys_weights = dict(w_diss=w_diss, w_sparse=w_sparse,
+                        w_fluid_anchor=w_fluid_anchor,
+                        w_fluid_torque=w_fluid_torque,
+                        w_fluid_smooth=w_fluid_smooth)
+    phys = PhysicsLosses(phi_g=gravity * dt * dt, ang_scale_vec=ang_scale_vec,
+                         mu_init=mu_init, learn_mu=learn_mu, fixed_mu=fix_mu,
+                         slip_v0=slip_v0, slip_tau=slip_tau)
+    any_phys = any(v > 0 for v in phys_weights.values())
+    if any_phys:
+        print(f"  physics losses ON: {[k for k, v in phys_weights.items() if v > 0]}"
+              f"   mu: " + (f"FIXED {fix_mu}" if fix_mu is not None else
+                            f"learnable, init {mu_init}" if learn_mu else
+                            f"frozen at {mu_init}"))
+        if phys_weights["w_fluid_smooth"] > 0 and multistep < 2:
+            print("  WARNING: w_fluid_smooth needs multistep >= 2 for "
+                  "consecutive predictions - it will contribute ZERO at K=1.")
+
     force_cfg = dict(dt=dt, gravity=gravity, mass=mass,
                      use_drag_baseline=use_drag_baseline, k_over_m=k_over_m,
                      contact_d0=contact_d0, contact_tau=contact_tau,
@@ -625,7 +654,11 @@ def train_force_gnn(Wall,
                      nearest_neighbors=nearest_neighbors,
                      scale_vec=scale_vec, ang_scale_vec=ang_scale_vec,
                      loss_mode=loss_mode,
-                     w_diss=w_diss, w_sparse=w_sparse, w_fluid_reg=w_fluid_reg,
+                     w_diss=w_diss, w_sparse=w_sparse,
+                     w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
+                     w_fluid_smooth=w_fluid_smooth,
+                     mu_init=mu_init, learn_mu=learn_mu, fix_mu=fix_mu,
+                     slip_v0=slip_v0, slip_tau=slip_tau, max_steps=max_steps,
                      noise_scale=noise_scale, rot_noise_scale=rot_noise_scale)
     norm_stats_path = os.path.splitext(save_model_path)[0] + "_norms.pt"
     torch.save({"x_mean": x_mean, "x_std": x_std, "e_mean": e_mean, "e_std": e_std,
@@ -650,7 +683,8 @@ def train_force_gnn(Wall,
     if compile_model and torch.cuda.is_available() and _triton_available():
         model = torch.compile(model)
 
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    phys = phys.to(device)
+    optimizer = optim.Adam(list(model.parameters()) + list(phys.parameters()), lr=lr)
     scheduler = None
     if Learning_Rate_Scheduler == "decay":
         scheduler = optim.lr_scheduler.ExponentialLR(
@@ -690,11 +724,24 @@ def train_force_gnn(Wall,
 
     train_loss_epochs, train_loss_values = [], []
     val_loss_epochs, val_loss_values = [], []
+    mu_trace = []
     best_val_loss, best_val_epoch = float("inf"), -1
     loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
 
+    # ---------------- step budget ----------------
+    # `max_steps` counts OPTIMIZER steps (the paper's 1M-step convention),
+    # which stays comparable across batch size, K, and curriculum - unlike
+    # epochs, where one K=8 epoch costs ~8x a K=1 epoch. When set, it
+    # overrides `epochs`; training stops mid-epoch once the budget is spent.
+    global_step = 0
+    budget_spent = False
+    if max_steps is not None:
+        epochs = 10 ** 9        # effectively unbounded; the budget terminates
+
     # ---------------- epochs ----------------
     for epoch in range(start_epoch, epochs):
+        if budget_spent:
+            break
         t0 = time.time()
         _K_now = _K_for_epoch(epoch)
         chain_index = build_chain_index(dataset_train, h, _K_now, stride=1)
@@ -702,7 +749,7 @@ def train_force_gnn(Wall,
 
         model.train()
         total_loss = 0.0
-        phys_accum = {"diss": 0.0, "sparse": 0.0, "fluid_reg": 0.0}
+        phys_accum = {}
         num_batches = 0
         optimizer.zero_grad(set_to_none=True)
 
@@ -721,17 +768,23 @@ def train_force_gnn(Wall,
                 use_wind=use_wind, use_drag_baseline=use_drag_baseline,
                 k_over_m=k_over_m, contact_d0=contact_d0, contact_tau=contact_tau,
                 loss_mode=loss_mode,
-                w_diss=w_diss, w_sparse=w_sparse, w_fluid_reg=w_fluid_reg)
+                phys=phys, phys_weights=phys_weights)
 
             (loss / accumulation_steps).backward()
             if (bi + 1) % accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                global_step += 1
 
             total_loss += float(loss.detach())
-            for key in phys_accum:
-                phys_accum[key] += raw_terms[key]
+            for key, v in raw_terms.items():
+                phys_accum[key] = phys_accum.get(key, 0.0) + v
             num_batches += 1
+            if max_steps is not None and global_step >= max_steps:
+                budget_spent = True
+                print(f"  step budget reached: {global_step}/{max_steps} "
+                      f"optimizer steps")
+                break
 
         if num_batches % accumulation_steps != 0:      # flush the remainder
             optimizer.step()
@@ -745,10 +798,14 @@ def train_force_gnn(Wall,
         if scheduler is not None:
             scheduler.step()
 
-        if any(w > 0 for w in (w_diss, w_sparse, w_fluid_reg)):
-            print(f"  Physics terms (raw) | diss: {phys_accum['diss']/max(num_batches,1):.3e} "
-                  f"| sparse: {phys_accum['sparse']/max(num_batches,1):.3e} "
-                  f"| fluid_reg: {phys_accum['fluid_reg']/max(num_batches,1):.3e}")
+        if any_phys and phys_accum:
+            nb = max(num_batches, 1)
+            line = " | ".join(f"{k}: {v/nb:.3e}" for k, v in sorted(phys_accum.items()))
+            print(f"  Physics terms (raw) | {line}")
+            if fix_mu is None and learn_mu:
+                mu_trace.append((epoch + 1, float(phys.mu)))
+                print(f"  recovered mu = {float(phys.mu):.4f}"
+                      f"   (data generator used 0.198 for the replica sets)")
 
         if epoch % validation_check_interval == 0:
             rollout_center, rollout_angle = rollout_force_batched(
@@ -782,7 +839,9 @@ def train_force_gnn(Wall,
                         "val_loss_values": val_loss_values,
                         "validation_check_interval": validation_check_interval,
                         "best_val_loss": best_val_loss,
-                        "best_val_epoch": best_val_epoch}, loss_history_path)
+                        "best_val_epoch": best_val_epoch,
+                        "mu_trace": mu_trace,
+                        "global_step": global_step}, loss_history_path)
         else:
             print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.9f}")
         print(f"Epoch {epoch+1}: build={t1-t0:.1f}s, train={t2-t1:.1f}s (K={_K_now})",
@@ -804,12 +863,24 @@ def train_force_gnn(Wall,
     final_path = os.path.splitext(save_model_path)[0] + "_final.pt"
     torch.save(model.state_dict(), final_path)
     print(f"Model saved to {final_path}")
+    phys_path = os.path.splitext(save_model_path)[0] + "_physics.pt"
+    torch.save({"state_dict": phys.state_dict(),
+                "recovered_mu": float(phys.mu),
+                "mu_mode": ("fixed" if fix_mu is not None
+                            else "learnable" if learn_mu else "frozen"),
+                "weights": phys_weights}, phys_path)
+    if any_phys and fix_mu is None and learn_mu:
+        print(f"Recovered friction coefficient mu = {float(phys.mu):.4f} "
+              f"(saved to {phys_path})")
     torch.save({"train_loss_epochs": train_loss_epochs,
                 "train_loss_values": train_loss_values,
                 "val_loss_epochs": val_loss_epochs,
                 "val_loss_values": val_loss_values,
                 "validation_check_interval": validation_check_interval,
                 "best_val_loss": best_val_loss,
-                "best_val_epoch": best_val_epoch}, loss_history_path)
-    print(f"Loss history saved to {loss_history_path}")
+                "best_val_epoch": best_val_epoch,
+                "mu_trace": mu_trace,
+                "global_step": global_step}, loss_history_path)
+    print(f"Loss history saved to {loss_history_path} "
+          f"(total optimizer steps: {global_step})")
     return model

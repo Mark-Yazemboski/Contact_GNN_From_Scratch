@@ -52,7 +52,7 @@ Floor = wall.wall(center_position=(0, 0, 0), size=(2, 2), normal=(0, 0, 1))
 
 # Point this at a *_wrench folder once add_wrench_labels.py has run, so the
 # same files carry ground-truth wrenches for evaluate_force_model.py.
-trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_20_wind")
+trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_0_wind")
 
 #This is the number of timesteps in each trajectory. 
 traj_timesteps = 200
@@ -60,8 +60,6 @@ traj_timesteps = 200
 Num_total_trajectories = 569
 training_percentage = 0.5
 validation_percentage = 0.3
-
-
 
 Num_train = int(training_percentage * Num_total_trajectories)
 Num_val = int(validation_percentage * Num_total_trajectories)
@@ -109,7 +107,6 @@ epoch_checkpoint_interval = 100
 weights_only_load = False                        # MuJoCo-generated data
 unscale_trajectory_data = False
 
-
 epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
 
 
@@ -125,8 +122,9 @@ DT = 1.0 / 148.0        # replica record rate. NOTE: generate_node_states.DT_REC
 GRAVITY = None          # None -> read from replica_physics in the data (9.615)
 MASS = 0.37
 
-use_wind_feature = True        # Stage 1: off. Stage 2+: on for wind datasets.
-use_drag_baseline = False       # Stage 2: True (analytic drag at COM, calibrated k/m)
+use_wind_feature = False        # Stage 1: off. Stage 2+: on for wind datasets.
+use_drag_baseline = True        # analytic drag at COM (calibrated k/m); the
+                                # anchor term assumes this is the fluid center
 K_OVER_M = 0.0285               # from wind_error_analysis.py drag calibration
 
 contact_d0 = 0.02               # soft geometric contact gate center (m)
@@ -138,16 +136,43 @@ contact_tau = 0.005             # gate width (m)
 # block-width position MSE. Keep "accel" until parity is established.
 loss_mode = "accel"
 
-# Physics-loss weights (Stage 3, one at a time). Set each so its weighted term
+# Training budget: max_steps counts OPTIMIZER steps (the paper's 1M-step
+# convention) and stays comparable across batch size and multistep K, unlike
+# epochs. When set, it OVERRIDES `epochs`. Set to None to use `epochs`.
+MAX_STEPS = 1_000_000
+
+# ----------------------------------------------------------------------
+# PHYSICS-INFORMED LOSS (proposal Eq. 5-6; one function per term in
+# physics_losses.py). Raw magnitudes print every epoch - calibrate each
+# gamma so (gamma * raw) is ~1-10%% of the position loss after epoch 1.
+#
+# What the wrench labels showed and which term answers it:
+#   fluid channel carried ~0.2 mg of friction (= mu m g), at every wind level
+#     -> w_fluid_anchor pins fluid to the analytic drag law
+#     -> w_fluid_smooth forbids the jumpy, contact-synchronized compensation
+#        (the chaotic pink arrow) - NEEDS multistep >= 2
+#     -> w_diss gives the displaced friction a correctly-structured home:
+#        anti-parallel to slip, proportional to the local normal force,
+#        one global mu. mu is LEARNABLE by default, so the model recovers
+#        the friction coefficient the same way it recovered the drag
+#        coefficient (replica ground truth: mu = 0.198).
+#   h_pen needs no weight: normal forces are >= 0 by construction (softplus). Set each so its weighted term
 # is ~1-10% of the position loss at init; raw magnitudes print every epoch.
-w_diss = 0.0
-w_sparse = 0.0
-w_fluid_reg = 0.0    # L2 on the raw fluid-head outputs (keep residual small)
+w_diss = 1e-3          # gamma_1: Coulomb dissipation on sliding contact
+w_sparse = 0.0         # contact sparsity - leave off initially (shrinks
+                       # legitimate resting normal forces too)
+w_fluid_anchor = 1e-2  # gamma_3a: fluid FORCE == analytic drag law
+w_fluid_torque = 1e-2  # gamma_3c: fluid TORQUE == 0 (all rotation from contact)
+w_fluid_smooth = 1e-2  # gamma_3b: fluid force smooth in time (K >= 2 only)
+
+MU_INIT = 0.2          # friction coefficient init
+LEARN_MU = True        # recover mu from data (the drag-coefficient story)
+FIX_MU = None          # or e.g. 1.9/9.615 to hard-fix it (ablation arm)
 
 # ----------------------------------------------------------------------
 # Naming / paths
 # ----------------------------------------------------------------------
-extra_name = "force_stage1_20wind"      # CHANGE PER EXPERIMENT
+extra_name = "force_stage1"      # CHANGE PER EXPERIMENT
 model_folder_path = os.path.join(script_dir, "models", extra_name)
 os.makedirs(model_folder_path, exist_ok=True)
 save_model_path = os.path.join(
@@ -205,7 +230,11 @@ if Train_model:
         contact_d0=contact_d0,
         contact_tau=contact_tau,
         loss_mode=loss_mode,
-        w_diss=w_diss, w_sparse=w_sparse, w_fluid_reg=w_fluid_reg,
+        w_diss=w_diss, w_sparse=w_sparse,
+        w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
+        w_fluid_smooth=w_fluid_smooth,
+        mu_init=MU_INIT, learn_mu=LEARN_MU, fix_mu=FIX_MU,
+        max_steps=MAX_STEPS,
         validation_check_interval=validation_check_interval,
         epoch_checkpoint_interval=epoch_checkpoint_interval,
     )
@@ -254,7 +283,11 @@ if Evaluate_model:
             contact_d0=contact_d0,
             contact_tau=contact_tau,
             dt=DT, gravity=GRAVITY, mass=MASS,
-            w_diss=w_diss, w_sparse=w_sparse, w_fluid_reg=w_fluid_reg,
+            max_steps=MAX_STEPS,
+            w_diss=w_diss, w_sparse=w_sparse,
+            w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
+            w_fluid_smooth=w_fluid_smooth,
+            learn_mu=LEARN_MU, fix_mu=FIX_MU,
         )
         save_run_report(model_folder_path, settings, metrics, slopes=[],
                         run_name=extra_name, master_csv=FORCE_MASTER_CSV)
