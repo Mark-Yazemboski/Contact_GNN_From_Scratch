@@ -40,7 +40,10 @@ Proposal Eq. (5) has three terms. Where each one lives here:
                   MuJoCo). This is the physics-infused version of
                   "regularize the fluid forces": shrink toward the law, not
                   toward zero.
-              (b) h_fluid_temporal_smooth(): the fluid force must vary
+                  NOTE the zero-torque default is a MuJoCo-specific claim;
+                  see h_fluid_torque for why it must not be carried to real
+                  data unchanged.
+              (b) h_fluid_temporal_smooth(): the fluid wrench must vary
                   SMOOTHLY IN TIME. Drag is a smooth function of relative
                   wind, which changes slowly; contact events are the jumpy
                   thing. With space collapsed to a point, "smooth
@@ -193,37 +196,74 @@ class PhysicsLosses(nn.Module):
         """
         return ((a_fluid_total - drag_target) / self.phi_g).pow(2).sum(-1).mean()
 
-    def h_fluid_torque(self, alpha_fluid):
-        """The fluid TORQUE must be ~zero: MuJoCo applies no meaningful fluid
-        torque on this body, so every real angular change must come from
-        contact lever arms. Separate from the force anchor (own weight, own
-        printed raw) because the two can be in very different regimes - a
-        rotation event the contact channel has not yet learned to explain
-        shows up HERE, and you want to see that, not have it silently averaged
-        into the force number."""
-        return (alpha_fluid / self.ang_scale_vec).pow(2).sum(-1).mean()
+    def h_fluid_torque(self, alpha_fluid, alpha_target=None):
+        """Anchor the fluid TORQUE to what the low-fidelity aero model
+        predicts - exactly parallel to h_fluid_anchor for the force.
+
+        alpha_target=None means "the model predicts zero torque". That is a
+        DATASET-SPECIFIC claim, not a law of physics:
+
+          * It is approximately right for a symmetric cube in MuJoCo, whose
+            passive fluid model produces only weak angular drag. VERIFY it
+            against the tau_fluid labels before relying on it - the evaluation
+            prints the true fluid torque magnitude for this purpose.
+          * It is WRONG in general. A body whose center of pressure is offset
+            from its COM experiences real aerodynamic torque, and that offset
+            is exactly what changes when contact alters the exposed geometry
+            (the proposal's contact/fluid/robot trinity). On real data, and on
+            the aerial manipulator in particular, fluid torque is a genuine
+            physical quantity and must not be regularized to zero.
+
+        For those cases pass alpha_target from an analytic or reduced-order
+        aero model, so this becomes shrinkage toward the physics rather than
+        toward zero - the same PIROM pattern as the force anchor, and the
+        nested f_theta(f_phi(...)) structure the proposal describes.
+
+        Kept separate from the force anchor (own weight, own printed raw)
+        because the two can sit in very different regimes: a rotation event
+        the contact channel has not learned to explain shows up HERE, and you
+        want to see it rather than have it averaged into the force number.
+        """
+        resid = alpha_fluid if alpha_target is None else (alpha_fluid - alpha_target)
+        return (resid / self.ang_scale_vec).pow(2).sum(-1).mean()
 
     # ------------------------------------------------------------------
     # h_smooth part (b): the fluid force may only change slowly in time
     # ------------------------------------------------------------------
-    def h_fluid_temporal_smooth(self, fluid_series):
-        """Drag is a smooth function of relative wind, and relative wind
-        changes slowly; contact impulses are the jumpy thing. Penalizing the
-        step-to-step change of the fluid force pushes any rapidly-switching
-        compensation (which is what stolen friction looks like at contact
-        events) out of the fluid channel.
+    def h_fluid_temporal_smooth(self, fluid_series, torque_series=None):
+        """Fluid loads vary smoothly in time; contact impulses are the jumpy
+        thing. Penalizing the step-to-step change of the fluid wrench pushes
+        any rapidly-switching, contact-synchronized compensation (what stolen
+        friction looks like at a contact event) out of the fluid channel.
+
+        THIS IS THE TERM THAT TRANSFERS TO REAL DATA. Unlike the anchors, it
+        makes no claim about the MAGNITUDE of the fluid wrench - only that
+        aerodynamic loads cannot switch discontinuously. That holds for a
+        cube in MuJoCo, for a tumbling body in a wind tunnel, and for the
+        aerial manipulator, whether or not any analytic model is available.
+        Torque is included for exactly that reason: real fluid torque is
+        nonzero but still smooth, so smoothness constrains it without
+        pretending to know its value.
 
         Needs consecutive predictions: multistep >= 2. Returns 0 at K=1 (the
         trainer warns once).
 
-        fluid_series: list of (B, 3) total fluid accelerations, one per unroll
-        step, in graph (not detached - both ends receive gradient).
+        fluid_series:  list of (B, 3) total fluid accelerations, one per unroll
+                       step, in graph (not detached - both ends get gradient).
+        torque_series: optional matching list of (B, 3) fluid angular
+                       accelerations. Normalized by the angular scale so the
+                       two contributions are commensurate under one weight.
         """
         if len(fluid_series) < 2:
             return fluid_series[0].new_zeros(())
         diffs = [((b - a) / self.phi_g).pow(2).sum(-1).mean()
                  for a, b in zip(fluid_series[:-1], fluid_series[1:])]
-        return torch.stack(diffs).mean()
+        total = torch.stack(diffs).mean()
+        if torque_series is not None and len(torque_series) >= 2:
+            tdiffs = [((b - a) / self.ang_scale_vec).pow(2).sum(-1).mean()
+                      for a, b in zip(torque_series[:-1], torque_series[1:])]
+            total = total + torch.stack(tdiffs).mean()
+        return total
 
     # ------------------------------------------------------------------
     # contact sparsity  (proposal Fig. 1: "sparsity regularization for
@@ -239,7 +279,8 @@ class PhysicsLosses(nn.Module):
     # Orchestrator
     # ------------------------------------------------------------------
     def compute_step_terms(self, phi_contact, c_w, v_node, wall_n,
-                           a_fluid_total, alpha_fluid, drag_target, weights):
+                           a_fluid_total, alpha_fluid, drag_target, weights,
+                           alpha_target=None):
         """All per-step terms as a dict of RAW (unweighted) scalars. Terms
         whose weight is zero are skipped (no wasted compute)."""
         raws = {}
@@ -248,7 +289,7 @@ class PhysicsLosses(nn.Module):
         if weights.get("w_fluid_anchor", 0) > 0:
             raws["fluid_anchor"] = self.h_fluid_anchor(a_fluid_total, drag_target)
         if weights.get("w_fluid_torque", 0) > 0:
-            raws["fluid_torque"] = self.h_fluid_torque(alpha_fluid)
+            raws["fluid_torque"] = self.h_fluid_torque(alpha_fluid, alpha_target)
         if weights.get("w_sparse", 0) > 0:
             raws["sparse"] = self.h_contact_sparsity(phi_contact)
         return raws
