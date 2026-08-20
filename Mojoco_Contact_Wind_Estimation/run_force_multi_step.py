@@ -12,10 +12,10 @@ THE STAGED PLAN (one variable at a time):
           force representation cost anything" before adding physics.
   Stage 2: use_drag_baseline=True on the wind datasets; run the extrapolation
           four-cell (train 0-5 m/s, test at 8) against the accel baseline.
-  Stage 3: turn on w_diss (then w_sparse / w_fluid_reg) ONE AT A TIME,
-          watching the raw physics-term magnitudes printed each epoch. h_diss
-          matters most: it is what disambiguates friction from horizontal
-          fluid force during a slide.
+  Stage 3: physics-informed losses (proposal Eq. 5-6). Watch the raw
+          physics-term magnitudes printed each epoch and calibrate the
+          weights against the position loss. w_fluid_smooth needs
+          multistep >= 2 - it is identically zero at K=1.
 """
 
 import os
@@ -27,19 +27,6 @@ from visualize_force_model import visualize_force_rollout
 from run_report import save_run_report
 from generate_node_states import BLOCK_HALF_WIDTH
 
-
-#This function will take in the number of trajectories we are training on, and the 
-#number of optimizer steps we want to hit, and some other perameters, and calculate
-#how many epochs we need to train for.
-def compute_epochs(num_trajectories, target_steps, batch_size, accumulation_steps, traj_timesteps=100, history=2):
-    usable_per_traj = traj_timesteps - history - 1
-    total_samples = num_trajectories * usable_per_traj
-    num_batches = (total_samples + batch_size - 1) // batch_size  # ceil division
-    effective_accum = min(accumulation_steps, num_batches)
-    steps_per_epoch = num_batches // effective_accum
-    steps_per_epoch = max(steps_per_epoch, 1)
-    epochs = (target_steps + steps_per_epoch - 1) // steps_per_epoch
-    return epochs
 
 torch.set_float32_matmul_precision('high')
 
@@ -53,9 +40,6 @@ Floor = wall.wall(center_position=(0, 0, 0), size=(2, 2), normal=(0, 0, 1))
 # Point this at a *_wrench folder once add_wrench_labels.py has run, so the
 # same files carry ground-truth wrenches for evaluate_force_model.py.
 trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_0_wind")
-
-#This is the number of timesteps in each trajectory. 
-traj_timesteps = 200
 
 Num_total_trajectories = 569
 training_percentage = 0.5
@@ -91,11 +75,21 @@ pos_history = 3
 
 batch_size = 512
 learning_rate = 1e-4
-steps = 1000000
+
+# Training length, in epochs, the SAME for every configuration.
+# At K=1 this is the budget that has been used all along (validation flattens
+# around 6k, so 10k is headroom). Holding it fixed across K also keeps the
+# number of OPTIMIZER STEPS roughly constant - samples per trajectory are
+# T - h - K, so K barely changes the steps per epoch - which makes a K
+# comparison a comparison of gradient updates, not of compute. The cost is
+# wall clock: a K-step unroll backprops through K predictions, so K=4 runs
+# about 4x longer per epoch.
+epochs = 10000
+
 noise_scale = 3e-4 * BLOCK_HALF_WIDTH            # meters/step, same as accel runs
 rot_noise_scale = None                           # None -> noise_scale / half_width (rad)
 
-multistep = 1                                    # the K=8 recipe
+multistep = 4                                    # K >= 2 required for w_fluid_smooth
 curriculum_epochs = 50                           # epochs per phase of [1,2,4,8]
 curriculum_schedule = None                       # None -> powers of 2 up to multistep
 Learning_Rate_Scheduler = None                # "decay", "cosine", or None
@@ -103,11 +97,14 @@ accumulation_steps = 1
 
 validation_check_interval = 10
 epoch_checkpoint_interval = 100
+# Rotating checkpoints: keep only the newest N '<name>_epoch<N>.pt' files.
+# At 10k epochs / interval 100 that is 100 files x (model + optimizer state)
+# per run - the ROAR storage problem. _best_model, _final, _norms, _physics and
+# _loss_history are never pruned. Set 0 to keep every checkpoint.
+keep_last_n_checkpoints = 2
 
 weights_only_load = False                        # MuJoCo-generated data
 unscale_trajectory_data = False
-
-epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
 
 
 # ----------------------------------------------------------------------
@@ -135,11 +132,6 @@ contact_tau = 0.005             # gate width (m)
 # exact and the logged loss number is directly comparable. "position" = the
 # block-width position MSE. Keep "accel" until parity is established.
 loss_mode = "accel"
-
-# Training budget: max_steps counts OPTIMIZER steps (the paper's 1M-step
-# convention) and stays comparable across batch size and multistep K, unlike
-# epochs. When set, it OVERRIDES `epochs`. Set to None to use `epochs`.
-MAX_STEPS = 1_000_000
 
 # ----------------------------------------------------------------------
 # PHYSICS-INFORMED LOSS (proposal Eq. 5-6; one function per term in
@@ -172,7 +164,7 @@ FIX_MU = None          # or e.g. 1.9/9.615 to hard-fix it (ablation arm)
 # ----------------------------------------------------------------------
 # Naming / paths
 # ----------------------------------------------------------------------
-extra_name = "force_stage1"      # CHANGE PER EXPERIMENT
+extra_name = "force_phys_loss"      # CHANGE PER EXPERIMENT
 model_folder_path = os.path.join(script_dir, "models", extra_name)
 os.makedirs(model_folder_path, exist_ok=True)
 save_model_path = os.path.join(
@@ -234,9 +226,9 @@ if Train_model:
         w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
         w_fluid_smooth=w_fluid_smooth,
         mu_init=MU_INIT, learn_mu=LEARN_MU, fix_mu=FIX_MU,
-        max_steps=MAX_STEPS,
         validation_check_interval=validation_check_interval,
         epoch_checkpoint_interval=epoch_checkpoint_interval,
+        keep_last_n_checkpoints=keep_last_n_checkpoints,
     )
 
 # ----------------------------------------------------------------------
@@ -283,7 +275,6 @@ if Evaluate_model:
             contact_d0=contact_d0,
             contact_tau=contact_tau,
             dt=DT, gravity=GRAVITY, mass=MASS,
-            max_steps=MAX_STEPS,
             w_diss=w_diss, w_sparse=w_sparse,
             w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
             w_fluid_smooth=w_fluid_smooth,

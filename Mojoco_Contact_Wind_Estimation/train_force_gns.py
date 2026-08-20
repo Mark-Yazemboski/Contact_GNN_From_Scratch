@@ -39,6 +39,7 @@ Everything is driven from run_force_multi_step.py.
 """
 
 import os
+import re
 import time
 import math
 import random
@@ -72,6 +73,37 @@ def _triton_available():
         return True
     except Exception:
         return False
+
+
+def prune_old_checkpoints(save_model_path, keep_last_n):
+    """Delete rotating '<stem>_epoch<N>.pt' checkpoints beyond the newest
+    `keep_last_n`. A 10k-epoch run at interval 100 otherwise leaves 100 files,
+    each carrying model AND optimizer state - the reason model folders blow up
+    on ROAR.
+
+    Touches ONLY files matching the _epoch<digits>.pt pattern. _best_model.pt,
+    _final.pt, _norms.pt, _physics.pt and _loss_history.pt are never
+    candidates, so the artifacts evaluation needs cannot be pruned by accident.
+    keep_last_n <= 0 disables pruning.
+    """
+    if keep_last_n is None or keep_last_n <= 0:
+        return
+    stem = os.path.splitext(save_model_path)[0]
+    folder = os.path.dirname(stem) or "."
+    base = os.path.basename(stem)
+    pattern = re.compile(r"^" + re.escape(base) + r"_epoch(\d+)\.pt$")
+
+    found = []
+    for fn in os.listdir(folder):
+        m = pattern.match(fn)
+        if m:
+            found.append((int(m.group(1)), os.path.join(folder, fn)))
+    found.sort()                                   # oldest epoch first
+    for _, path in found[:-keep_last_n]:
+        try:
+            os.remove(path)
+        except OSError as e:
+            print(f"  (could not remove {os.path.basename(path)}: {e})")
 
 
 def _random_z_rotation():
@@ -301,6 +333,7 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
     any_phys = phys is not None and any(v > 0 for v in phys_weights.values())
     raw_accum = {}
     fluid_series = []      # total fluid accel per step, for temporal smoothness
+    torque_series = []     # fluid angular accel per step, same purpose
 
     step_losses = []
     for k in range(multistep):
@@ -353,6 +386,7 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
             fluid_total_phys = (a_fluid + drag_target if use_drag_baseline
                                 else a_fluid)
             fluid_series.append(fluid_total_phys)
+            torque_series.append(alpha_fluid)
             step_raws = phys.compute_step_terms(
                 parts["phi_contact"], c_w, v_node, wall_n,
                 fluid_total_phys, alpha_fluid, drag_target, phys_weights)
@@ -367,7 +401,8 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
 
     raw_terms = {k: v / multistep for k, v in raw_accum.items()}
     if any_phys and phys_weights.get("w_fluid_smooth", 0) > 0:
-        raw_terms["fluid_smooth"] = phys.h_fluid_temporal_smooth(fluid_series)
+        raw_terms["fluid_smooth"] = phys.h_fluid_temporal_smooth(
+            fluid_series, torque_series)
     total = pos_loss + PhysicsLosses.weighted_total(raw_terms, phys_weights)
     return total, pos_loss.detach(), {k: float(v.detach()) for k, v in raw_terms.items()}
 
@@ -560,6 +595,7 @@ def train_force_gnn(Wall,
                                            # overrides `epochs` when set
                     validation_check_interval=10,
                     epoch_checkpoint_interval=100,
+                    keep_last_n_checkpoints=2,   # rotate; 0/None = keep all
                     resume_checkpoint_path=None,
                     compile_model=True):
 
@@ -652,6 +688,7 @@ def train_force_gnn(Wall,
                      L=message_passing_layers, K=repeat_blocks,
                      nodes_per_edge=nodes_per_edge,
                      nearest_neighbors=nearest_neighbors,
+                     multistep=multistep, epochs=epochs,
                      scale_vec=scale_vec, ang_scale_vec=ang_scale_vec,
                      loss_mode=loss_mode,
                      w_diss=w_diss, w_sparse=w_sparse,
@@ -858,7 +895,10 @@ def train_force_gnn(Wall,
                         "val_loss_values": val_loss_values,
                         "best_val_loss": best_val_loss,
                         "best_val_epoch": best_val_epoch}, checkpoint_path)
-            print(f"Checkpoint saved to {checkpoint_path}")
+            prune_old_checkpoints(save_model_path, keep_last_n_checkpoints)
+            kept = ("all" if not keep_last_n_checkpoints
+                    else f"last {keep_last_n_checkpoints}")
+            print(f"Checkpoint saved to {checkpoint_path}  (keeping {kept})")
 
     final_path = os.path.splitext(save_model_path)[0] + "_final.pt"
     torch.save(model.state_dict(), final_path)
