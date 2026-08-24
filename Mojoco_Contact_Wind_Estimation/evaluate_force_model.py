@@ -83,11 +83,16 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
     model.load_state_dict(sd)
     model.to(device).eval()
 
+    # Recovered friction coefficient, written by training to <prefix>_physics.pt.
+    # Captured here (not just printed) so it flows into the returned metrics ->
+    # run_report -> the master CSV, alongside every other headline number.
+    recovered_mu = None
     phys_path = os.path.join(MODEL_FOLDER, MODEL_PREFIX + "_physics.pt")
     if os.path.exists(phys_path):
         pinfo = torch.load(phys_path, map_location="cpu", weights_only=False)
+        recovered_mu = float(pinfo.get("recovered_mu", float("nan")))
         if pinfo.get("mu_mode") == "learnable":
-            print(f"Recovered friction coefficient mu = {pinfo['recovered_mu']:.4f}"
+            print(f"Recovered friction coefficient mu = {recovered_mu:.4f}"
                   f"   (replica ground truth: 0.198)")
 
     # ======================================================================
@@ -327,6 +332,8 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
         n_test=float(len(per_traj)),
         have_wrench_labels=float(bool(have_labels)),
     )
+    if recovered_mu is not None:
+        out["recovered_mu"] = recovered_mu
     out.update(wrench_metrics)
     return out
 
