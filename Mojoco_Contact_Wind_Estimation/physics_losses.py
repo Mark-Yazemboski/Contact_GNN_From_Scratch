@@ -288,8 +288,6 @@ class PhysicsLosses(nn.Module):
             raws["diss"] = self.h_dissipation(phi_contact, c_w, v_node, wall_n)
         if weights.get("w_fluid_anchor", 0) > 0:
             raws["fluid_anchor"] = self.h_fluid_anchor(a_fluid_total, drag_target)
-        if weights.get("w_fluid_torque", 0) > 0:
-            raws["fluid_torque"] = self.h_fluid_torque(alpha_fluid, alpha_target)
         if weights.get("w_sparse", 0) > 0:
             raws["sparse"] = self.h_contact_sparsity(phi_contact)
         return raws
