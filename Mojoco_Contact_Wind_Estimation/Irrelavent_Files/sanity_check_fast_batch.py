@@ -19,8 +19,8 @@ import random
 
 from torch_geometric.loader import DataLoader as PyGDataLoader
 
-from train_gnn_multi_step import _build_timestep_samples
-from fast_batch import build_epoch_tensors, iterate_batches, n_batches
+from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import _build_timestep_samples
+from Mojoco_Contact_Wind_Estimation.fast_batch import build_epoch_tensors, iterate_batches, n_batches
 
 
 # ----------------------------------------------------------------------
@@ -166,7 +166,7 @@ def main():
     print("TEST 3: model forward output equality")
     print("-" * 70)
 
-    from train_gnn_multi_step import GNSModel
+    from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import GNSModel
 
     node_dim = epoch_data['x'].shape[-1]
     edge_dim = epoch_data['edge_attr'].shape[-1]

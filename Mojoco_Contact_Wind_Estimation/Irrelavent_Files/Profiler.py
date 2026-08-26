@@ -25,7 +25,7 @@ import torch
 from torch_geometric.data import Data
 
 # Match the imports used by train_gnn_multi_step.py
-from train_gnn_multi_step import _build_timestep_samples, build_dataset, _compute_node_stats,_compute_edge_stats,_compute_accel_stats
+from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import _build_timestep_samples, build_dataset, _compute_node_stats,_compute_edge_stats,_compute_accel_stats
 from generate_node_states import get_clean_positions, add_random_walk_noise
 
 

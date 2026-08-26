@@ -31,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import wall
-from train_gnn_multi_step import GNSModel
+from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import GNSModel
 from generate_node_states import mesh_cube_surface, BLOCK_HALF_WIDTH
 from evaluate_metrics import (compute_metrics, compute_phase_boundaries,
                               BLOCK_WIDTH)

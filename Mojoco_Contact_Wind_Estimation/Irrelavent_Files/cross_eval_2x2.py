@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 import wall
-from train_gnn_multi_step import GNSModel
+from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import GNSModel
 from generate_node_states import mesh_cube_surface, BLOCK_HALF_WIDTH
 from evaluate_metrics import compute_metrics, BLOCK_WIDTH
 from display_results import rollout_trajectory_feedback_shape_match
