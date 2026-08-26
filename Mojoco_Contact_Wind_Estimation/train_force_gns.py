@@ -48,7 +48,7 @@ import torch
 import torch.optim as optim
 
 # ---- reused, unmodified, from the existing codebase ----
-from train_gnn_multi_step import (_build_features_for_unroll,
+from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import (_build_features_for_unroll,
                                   _build_timestep_samples,
                                   _compute_node_stats,
                                   _compute_edge_stats,
@@ -350,7 +350,7 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
                                                      ang_scale_vec)
 
         extra_accel = a_fluid
-        if use_drag_baseline:
+        if use_drag_baseline: 
             extra_accel = extra_accel + drag_accel_step(
                 wind, com_curr - com_prev, dt, k_over_m)
         com_next, R_next = rigid_step(phi_c, com_prev, com_curr, R_prev, R_curr,

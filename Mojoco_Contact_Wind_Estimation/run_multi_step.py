@@ -1,9 +1,9 @@
 from random import random
 import torch
 import wall
-import train_gnn_multi_step
+import Mojoco_Contact_Wind_Estimation.train_gnn_multi_step as train_gnn_multi_step
 import generate_node_states
-from train_gnn_multi_step import GNSModel
+from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import GNSModel
 import display_results 
 import evaluate_metrics
 import random
