@@ -172,11 +172,13 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
     ax.plot([], [], [], c=C_NORMAL, lw=2, label='contact normal')
     ax.plot([], [], [], c=C_TANGENT, lw=2, label='contact tangential')
     ax.plot([], [], [], c=C_FLUID, lw=2, label='fluid @ COM')
+    ax.plot([], [], [], c=C_TANGENT, lw=2, label=f'contact tangential (x{TANGENT_GAIN:g})')
     ax.legend(loc='upper left', fontsize=8)
 
     hud = fig.text(0.015, 0.015, "", fontsize=9, family='monospace', va='bottom')
     ax.set_title(f"traj {TRAJECTORY} - red=pred, blue=GT | "
-                 f"arrow: {MG_ARROW_WIDTHS:g} width = m g = {MG:.2f} N")
+             f"arrow: {MG_ARROW_WIDTHS:g} width = m g = {MG:.2f} N"
+             f"  (tangential x{TANGENT_GAIN:g})")
 
     quivers = []            # mutable holder so update() can clear last frame's arrows
 
@@ -214,22 +216,23 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
             ft = f_tang[k].numpy()
             ff = f_fluid[k].numpy()
 
-            for vecs, color in ((fn, C_NORMAL), (ft, C_TANGENT)):
+            for vecs, color, gain in ((fn, C_NORMAL, NORMAL_GAIN),
+                                    (ft, C_TANGENT, TANGENT_GAIN)):
                 mags = np.linalg.norm(vecs, axis=1)
                 sel = mags > MIN_F
                 if sel.any():
+                    s = ARROW_SCALE * gain
                     quivers.append(ax.quiver(
                         p[sel, 0], p[sel, 1], p[sel, 2],
-                        vecs[sel, 0] * ARROW_SCALE,
-                        vecs[sel, 1] * ARROW_SCALE,
-                        vecs[sel, 2] * ARROW_SCALE,
-                        color=color, linewidth=1.8, arrow_length_ratio=0.25))
+                        vecs[sel, 0] * s, vecs[sel, 1] * s, vecs[sel, 2] * s,
+                        color=color, linewidth=2.4, arrow_length_ratio=0.25))
 
             com = p.mean(axis=0)
             if np.linalg.norm(ff) > MIN_F:
+                s = ARROW_SCALE * FLUID_GAIN
                 quivers.append(ax.quiver(
                     com[0], com[1], com[2],
-                    ff[0] * ARROW_SCALE, ff[1] * ARROW_SCALE, ff[2] * ARROW_SCALE,
+                    ff[0] * s, ff[1] * s, ff[2] * s,
                     color=C_FLUID, linewidth=2.2, arrow_length_ratio=0.25))
 
             n_active = int((np.linalg.norm(fn, axis=1) > MIN_F).sum())
@@ -286,7 +289,10 @@ if __name__ == "__main__":
 
     # --- arrow appearance ---
     MG_ARROW_WIDTHS = 1.0        # a force of m*g draws this many block-widths long
-    MIN_ARROW_FRAC = 0.01        # skip arrows below this fraction of m*g (declutter)
+    NORMAL_GAIN  = 1.0           # per-channel display gain on top of the physical scale
+    TANGENT_GAIN = 8.0           # friction is ~mu*mg/n_contact_nodes -- unreadable at 1.0
+    FLUID_GAIN   = 1.0
+    MIN_ARROW_FRAC = 0.002       # was 0.01, which culled per-node friction in slow frames
     DRAW_FLOOR = True
     DRAW_GROUND_TRUTH = True
 
