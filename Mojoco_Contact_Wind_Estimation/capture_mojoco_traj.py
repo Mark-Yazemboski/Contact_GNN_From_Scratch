@@ -63,16 +63,40 @@ def new_wrench_interval():
                 Tc_q=np.zeros(3), Tf=np.zeros(3))
 
 
+# Running audit of the "passive force == fluid force" assumption. qfrc_passive
+# is the TOTAL passive force (spring + damper + gravcomp + fluid); labelling it
+# J_fluid is only correct if nothing but fluid contributes. MuJoCo >= 3.0 splits
+# it into qfrc_{spring,damper,gravcomp,fluid}, so we read the fluid term
+# DIRECTLY and additionally record how far the two ever diverge.
+PASSIVE_AUDIT = dict(max_nonfluid=0.0, have_qfrc_fluid=None, substeps=0)
+
+
+def fluid_qfrc(data):
+    """The fluid part of the passive generalized force. Correct by
+    construction on mujoco>=3.0; falls back to qfrc_passive (the old, unproven
+    assumption) on older versions, and audit_passive_terms() says so loudly."""
+    if PASSIVE_AUDIT["have_qfrc_fluid"] is None:
+        PASSIVE_AUDIT["have_qfrc_fluid"] = hasattr(data, "qfrc_fluid")
+    if not PASSIVE_AUDIT["have_qfrc_fluid"]:
+        return data.qfrc_passive
+    PASSIVE_AUDIT["substeps"] += 1
+    PASSIVE_AUDIT["max_nonfluid"] = max(
+        PASSIVE_AUDIT["max_nonfluid"],
+        float(np.abs(data.qfrc_passive - data.qfrc_fluid).max()))
+    return data.qfrc_fluid
+
+
 def accumulate_substep_wrench(model, data, acc, dt, selector):
     """Add one substep's worth of impulse to the current recorded interval.
     free-joint qvel[3:6] is BODY-frame angular velocity, so the generalized
     angular forces are BODY-frame torques and are rotated to world with R(t)."""
     R = Rotation.from_quat(data.qpos[3:7][[1, 2, 3, 0]]).as_matrix()
     com = data.xipos[1].copy()
+    qf = fluid_qfrc(data)
     acc["Jc"] += data.qfrc_constraint[:3] * dt
-    acc["Jf"] += data.qfrc_passive[:3] * dt
+    acc["Jf"] += qf[:3] * dt
     acc["Tc_q"] += (R @ data.qfrc_constraint[3:6]) * dt
-    acc["Tf"] += (R @ data.qfrc_passive[3:6]) * dt
+    acc["Tf"] += (R @ qf[3:6]) * dt
     fw, pts = selector.world_forces(model, data)
     for F, p in zip(fw, pts):
         acc["Tc"] += np.cross(p - com, F) * dt
@@ -112,6 +136,52 @@ def verify_wrench(qvel_lin, wrench, mass, g_vec, dt_record):
                 rel_max_air=float(rel[~contact].max()) if (~contact).any() else 0.0,
                 rel_max_contact=float(rel[contact].max()) if contact.any() else 0.0,
                 mean_resid=resid.mean(axis=0), grav_imp=grav_imp)
+
+
+def audit_passive_terms(model, data=None):
+    """ONE-TIME model-level check that the passive force contains only fluid.
+    Every source listed must read 0, otherwise J_fluid / tau_fluid are polluted
+    with spring, damper, or gravity-compensation force and the "fluid ground
+    truth" claim in the thesis is false. Call once after loading the model."""
+    print("\n" + "=" * 70)
+    print("PASSIVE-FORCE AUDIT - is the passive force really the FLUID force?")
+    print("=" * 70)
+    print(f"  mujoco version          = {mujoco.__version__}")
+    have = data is not None and hasattr(data, "qfrc_fluid")
+    print(f"  data.qfrc_fluid present = {have}"
+          + ("   (reading the fluid term directly)" if have else
+             "   <-- needs mujoco>=3.0; FALLING BACK to qfrc_passive"))
+
+    sources = [
+        ("joint stiffness (springs)", model.jnt_stiffness),
+        ("dof damping",               model.dof_damping),
+        ("dof frictionloss",          model.dof_frictionloss),
+        ("body gravcomp",             model.body_gravcomp),
+        ("tendon stiffness",          model.tendon_stiffness),
+        ("tendon damping",            model.tendon_damping),
+    ]
+    dirty = False
+    for name, arr in sources:
+        v = float(np.abs(np.asarray(arr)).max()) if np.asarray(arr).size else 0.0
+        dirty |= (v != 0.0)
+        print(f"  max {name:<26s} = {v:<12.6g}"
+              + ("  <-- POLLUTES the fluid label" if v != 0.0 else ""))
+    for name, n in (("tendons", model.ntendon), ("flexes", model.nflex),
+                    ("plugins", model.nplugin)):
+        dirty |= (n != 0)
+        print(f"  n_{name:<27s} = {n}" + ("  <-- POLLUTES the fluid label" if n else ""))
+
+    print(f"  medium: density={model.opt.density:.6g} viscosity={model.opt.viscosity:.6g} "
+          f"wind={np.asarray(model.opt.wind).round(3).tolist()}")
+    gf = np.asarray(model.geom_fluid).reshape(model.ngeom, -1)
+    ell = [i for i in range(model.ngeom) if gf[i, 0] != 0.0]
+    print(f"  geoms using the ELLIPSOID fluid model: {ell}"
+          + ("   (empty -> inertia-based / Stokes drag only)" if not ell else ""))
+    print("  " + ("CLEAN: passive force can only be fluid." if not dirty else
+                  "DIRTY: fix the flagged entries before trusting J_fluid."))
+    print("  Runtime max |qfrc_passive - qfrc_fluid| is printed with the wrench")
+    print("  diagnostics below; it must be exactly 0.0.")
+    print("=" * 70 + "\n")
 
 
 #This file will generate all of the training data we will use to train the contact and fluid GNN. Using mojoco's built in
@@ -312,6 +382,7 @@ if __name__ == "__main__":
     model = mujoco.MjModel.from_xml_path(os.path.join(script_dir, "cube.xml"))
     print("Friction parameters for the cube and floor geoms:")
     print(model.geom_friction)
+    audit_passive_terms(model, mujoco.MjData(model))
 
     #----- Dataset parameters -----
 
@@ -444,7 +515,10 @@ if __name__ == "__main__":
                 print(f"  mean residual vector = {v['mean_resid']} N*s")
                 print(f"     (systematic bias along one axis = missing force term;")
                 print(f"      zero-mean scatter = integrator round-off, harmless)")
-                print(f"  contact-frame cross-check = {wrench['contact_xcheck']:.3e} N\n")
+                print(f"  contact-frame cross-check = {wrench['contact_xcheck']:.3e} N")
+                print(f"  max |qfrc_passive - qfrc_fluid| = "
+                      f"{PASSIVE_AUDIT['max_nonfluid']:.3e}  "
+                      f"({PASSIVE_AUDIT['substeps']} substeps; MUST be 0.0)\n")
 
         save_path = os.path.join(save_dir, f"{i}.pt")
         torch.save(save_data, save_path)
@@ -464,3 +538,6 @@ if __name__ == "__main__":
         print(f"     contact  median {100*np.median(con):.4f}%   max {100*con.max():.4f}%")
         print(f"  Anything under ~1% is bookkeeping-clean; a real frame/sign bug"
               f" shows up near 100%.")
+        print(f"  Fluid-label purity: max |qfrc_passive - qfrc_fluid| = "
+              f"{PASSIVE_AUDIT['max_nonfluid']:.3e} over "
+              f"{PASSIVE_AUDIT['substeps']} substeps (0.0 = labels are pure fluid).")

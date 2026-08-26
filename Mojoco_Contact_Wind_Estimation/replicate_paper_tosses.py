@@ -39,7 +39,8 @@ from scipy.spatial.transform import Rotation
 # safe - its dataset-generation code is under `if __name__ == "__main__"`.
 from capture_mojoco_traj import (ContactFrameSelector, new_wrench_interval,
                                  accumulate_substep_wrench, verify_wrench,
-                                 make_wrench_save_dict)
+                                 make_wrench_save_dict, audit_passive_terms,
+                                 PASSIVE_AUDIT)
 
 from generate_node_states import (mesh_cube_surface, quat_to_rotmat,
                                   unscale_position_velocity, BLOCK_HALF_WIDTH)
@@ -51,7 +52,7 @@ from evaluate_metrics import compute_phase_boundaries, BLOCK_WIDTH
 script_dir   = os.path.dirname(os.path.abspath(__file__))
 PAPER_FOLDER = os.path.join(script_dir, "data/tosses_processed")
 INDICES      = range(0, 569)
-OUT_NAME     = "mojoco_paper_replica_0_wind"
+OUT_NAME     = "mojoco_paper_replica_40_wind"
 OUT_DIR      = os.path.join(script_dir, "data", OUT_NAME)
 XML_PATH     = os.path.join(script_dir, "cube.xml")
 
@@ -78,7 +79,7 @@ SOLREF_TIME = 0.02
 MIN_AIRBORNE_FIT = 5            # frames needed for the launch fits
 MASS = 0.37
 
-WIND_RANGE     = (0.0, 0)      # uniform |wind| range, horizontal (m/s)
+WIND_RANGE     = (0.0, 40)      # uniform |wind| range, horizontal (m/s)
 FIX_WIND_DIR   = False
 WIND_DIR_FIXED = (1.0, 0.0, 0.0)
 MEASURE_WIND_EFFECT = True       # also sim a no-wind twin per traj, report deviation
@@ -104,6 +105,7 @@ print(f"  friction  = {model.geom_friction[:, 0].tolist()}")
 print(f"  cone      = {'elliptic' if int(model.opt.cone) == 1 else 'pyramidal'}")
 print(f"  solref    = {model.geom_solref[0].tolist()}   mass = {model.body_mass[1]:.3f}")
 print("=" * 70)
+audit_passive_terms(model, mujoco.MjData(model))
 
 NODES_BODY = torch.tensor(mesh_cube_surface(BLOCK_WIDTH, 2), dtype=torch.float32)
 
@@ -365,7 +367,10 @@ for n_done, idx in enumerate(INDICES, 1):
             print(f"  mean residual vector = {v['mean_resid']} N*s")
             print(f"     (systematic bias along one axis = missing force term;")
             print(f"      zero-mean scatter = integrator round-off, harmless)")
-            print(f"  contact-frame cross-check = {twin_wrench['contact_xcheck']:.3e} N\n")
+            print(f"  contact-frame cross-check = {twin_wrench['contact_xcheck']:.3e} N")
+            print(f"  max |qfrc_passive - qfrc_fluid| = "
+                  f"{PASSIVE_AUDIT['max_nonfluid']:.3e}  "
+                  f"({PASSIVE_AUDIT['substeps']} substeps; MUST be 0.0)\n")
 
     torch.save(save_data, os.path.join(OUT_DIR, f"{idx}.pt"))
 
@@ -442,5 +447,8 @@ if wrench_verif:
     print(f"     contact  median {100*np.median(con):.4f}%   max {100*con.max():.4f}%")
     print(f"  Under ~1% is bookkeeping-clean; a real frame/sign/alignment bug"
           f" shows up near 100%.")
+    print(f"  Fluid-label purity: max |qfrc_passive - qfrc_fluid| = "
+          f"{PASSIVE_AUDIT['max_nonfluid']:.3e} over "
+          f"{PASSIVE_AUDIT['substeps']} substeps (0.0 = labels are pure fluid).")
 
 print(f"\nSaved twins to {OUT_DIR}/, CSV + report PNG next to this script.")
