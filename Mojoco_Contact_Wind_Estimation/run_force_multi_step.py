@@ -119,7 +119,7 @@ DT = 1.0 / 148.0        # replica record rate. NOTE: generate_node_states.DT_REC
 GRAVITY = None          # None -> read from replica_physics in the data (9.615)
 MASS = 0.37
 
-use_wind_feature = False        # Stage 1: off. Stage 2+: on for wind datasets.
+use_wind_feature = True        # Stage 1: off. Stage 2+: on for wind datasets.
 use_drag_baseline = True        # analytic drag at COM (calibrated k/m); the
                                 # anchor term assumes this is the fluid center
 K_OVER_M = 0.0285               # from wind_error_analysis.py drag calibration
@@ -154,10 +154,9 @@ w_diss = 1e-3          # gamma_1: Coulomb dissipation on sliding contact
 w_sparse = 0.0         # contact sparsity - leave off initially (shrinks
                        # legitimate resting normal forces too)
 w_fluid_anchor = 1e-2  # gamma_3a: fluid FORCE == analytic drag law
-w_fluid_torque = 1e-2  # gamma_3c: fluid TORQUE == 0 (all rotation from contact)
 w_fluid_smooth = 1e-2  # gamma_3b: fluid force smooth in time (K >= 2 only)
 
-MU_INIT = 0.2          # friction coefficient init
+MU_INIT = 0.3          # friction coefficient init
 LEARN_MU = True        # recover mu from data (the drag-coefficient story)
 FIX_MU = None          # or e.g. 1.9/9.615 to hard-fix it (ablation arm)
 
@@ -223,7 +222,7 @@ if Train_model:
         contact_tau=contact_tau,
         loss_mode=loss_mode,
         w_diss=w_diss, w_sparse=w_sparse,
-        w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
+        w_fluid_anchor=w_fluid_anchor,
         w_fluid_smooth=w_fluid_smooth,
         mu_init=MU_INIT, learn_mu=LEARN_MU, fix_mu=FIX_MU,
         validation_check_interval=validation_check_interval,
@@ -276,7 +275,7 @@ if Evaluate_model:
             contact_tau=contact_tau,
             dt=DT, gravity=GRAVITY, mass=MASS,
             w_diss=w_diss, w_sparse=w_sparse,
-            w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
+            w_fluid_anchor=w_fluid_anchor,
             w_fluid_smooth=w_fluid_smooth,
             learn_mu=LEARN_MU, fix_mu=FIX_MU,
         )
