@@ -585,7 +585,6 @@ def train_force_gnn(Wall,
                     w_diss=0.0,            # gamma_1: Coulomb dissipation
                     w_sparse=0.0,          # contact sparsity (Fig. 1)
                     w_fluid_anchor=0.0,    # gamma_3a: fluid force == analytic drag law
-                    w_fluid_torque=0.0,    # gamma_3c: fluid torque == 0
                     w_fluid_smooth=0.0,    # gamma_3b: fluid smooth in time (K>=2)
                     mu_init=0.2,           # friction coefficient init
                     learn_mu=True,         # recover mu from data
@@ -623,7 +622,7 @@ def train_force_gnn(Wall,
              "_unroll_chain_loss_accel)" if loss_mode == "accel"
              else "   (position MSE in block widths)"))
     print(f"  physics-loss weights: diss={w_diss} sparse={w_sparse} "
-          f"fluid_anchor={w_fluid_anchor} fluid_torque={w_fluid_torque} "
+          f"fluid_anchor={w_fluid_anchor} "
           f"fluid_smooth={w_fluid_smooth}")
     if meta:
         print(f"  replica_physics found in data: {meta}")
@@ -666,7 +665,6 @@ def train_force_gnn(Wall,
     # ---------------- physics-informed loss module ----------------
     phys_weights = dict(w_diss=w_diss, w_sparse=w_sparse,
                         w_fluid_anchor=w_fluid_anchor,
-                        w_fluid_torque=w_fluid_torque,
                         w_fluid_smooth=w_fluid_smooth)
     phys = PhysicsLosses(phi_g=gravity * dt * dt, ang_scale_vec=ang_scale_vec,
                          mu_init=mu_init, learn_mu=learn_mu, fixed_mu=fix_mu,
@@ -692,7 +690,7 @@ def train_force_gnn(Wall,
                      scale_vec=scale_vec, ang_scale_vec=ang_scale_vec,
                      loss_mode=loss_mode,
                      w_diss=w_diss, w_sparse=w_sparse,
-                     w_fluid_anchor=w_fluid_anchor, w_fluid_torque=w_fluid_torque,
+                     w_fluid_anchor=w_fluid_anchor,
                      w_fluid_smooth=w_fluid_smooth,
                      mu_init=mu_init, learn_mu=learn_mu, fix_mu=fix_mu,
                      slip_v0=slip_v0, slip_tau=slip_tau, max_steps=max_steps,

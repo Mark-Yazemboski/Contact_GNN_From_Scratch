@@ -63,6 +63,15 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
     SAVE_PATH = save_path if save_path is not None else os.path.join(
         model_folder, f"force_rollout_{trajectory}.gif")
     C_NORMAL, C_TANGENT, C_FLUID = "tab:green", "tab:orange", "magenta"
+
+     # --- arrow appearance ---
+    MG_ARROW_WIDTHS = 1.0        # a force of m*g draws this many block-widths long
+    NORMAL_GAIN  = 1.0           # per-channel display gain on top of the physical scale
+    TANGENT_GAIN = 8.0           # friction is ~mu*mg/n_contact_nodes -- unreadable at 1.0
+    FLUID_GAIN   = 1.0
+    MIN_ARROW_FRAC = 0.002       # was 0.01, which culled per-node friction in slow frames
+    DRAW_FLOOR = True
+    DRAW_GROUND_TRUTH = True
     # ======================================================================
     # Load model + config
     # ======================================================================
