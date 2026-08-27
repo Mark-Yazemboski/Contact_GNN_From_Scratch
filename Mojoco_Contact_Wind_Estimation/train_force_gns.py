@@ -48,7 +48,7 @@ import torch
 import torch.optim as optim
 
 # ---- reused, unmodified, from the existing codebase ----
-from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import (_build_features_for_unroll,
+from train_gnn_multi_step import (_build_features_for_unroll,
                                   _build_timestep_samples,
                                   _compute_node_stats,
                                   _compute_edge_stats,
