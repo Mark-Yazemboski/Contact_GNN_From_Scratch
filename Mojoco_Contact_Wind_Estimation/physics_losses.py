@@ -173,6 +173,86 @@ class PhysicsLosses(nn.Module):
         norm = c_w.detach().sum() + self.eps
         return (w * resid.pow(2).sum(-1, keepdim=True)).sum() / norm
 
+    def slip_gate_report(self, phi_contact, c_w, v_node, wall_n, dt=None):
+            """Is h_dissipation awake? Mirrors h_dissipation's gating exactly.
+    
+            h_dissipation weights every node by (c_w * slip_gate). If the
+            slip_gate factor is ~0 across the batch, the term contributes
+            nothing at ANY weight and mu - whose only gradient path is this
+            term - is being fit from whatever sliver of frames does get through.
+    
+            Returns a dict; see fmt_slip_gate_report() for the one-line print.
+            phi_contact/c_w/v_node/wall_n: the SAME tensors you pass to
+            compute_step_terms. dt (s) is optional and only converts the
+            m/step figures to m/s for readability.
+            """
+            v = v_node.detach()
+            v_t = v - (v * wall_n).sum(-1, keepdim=True) * wall_n
+            speed = v_t.norm(dim=-1, keepdim=True)                 # (B,N,1) m/step
+            gate = torch.sigmoid((speed - self.slip_v0) / self.slip_tau)
+    
+            w_c = c_w.detach()
+            contact_mass = w_c.sum().clamp_min(self.eps)
+            # This ratio IS the multiplier on h_dissipation's effective size.
+            gate_frac = float((w_c * gate).sum() / contact_mass)
+    
+            # Slip-speed distribution over nodes that are actually in contact,
+            # which is the population the gate is deciding about.
+            in_contact = (w_c > 0.5).squeeze(-1)
+            s = speed.squeeze(-1)[in_contact]
+            if s.numel() == 0:
+                pct = {q: float('nan') for q in (10, 50, 90, 99)}
+            else:
+                qs = torch.tensor([0.10, 0.50, 0.90, 0.99], device=s.device,
+                                  dtype=s.dtype)
+                vals = torch.quantile(s, qs)
+                pct = {q: float(x) for q, x in zip((10, 50, 90, 99), vals)}
+    
+            # Counterfactuals: what would gate_frac be at a lower threshold?
+            # This is the number that decides whether slip_v0 is the real knob.
+            cf = {}
+            for div in (3.0, 10.0, 30.0):
+                g2 = torch.sigmoid((speed - self.slip_v0 / div) / self.slip_tau)
+                cf[div] = float((w_c * g2).sum() / contact_mass)
+    
+            # mu implied by the model's OWN predicted forces on sliding nodes.
+            # Coulomb says ||phi_t|| = mu * phi_n while sliding, so this is the
+            # mu the force decomposition is currently consistent with -
+            # independent of the learnable mu parameter.
+            phi_n = (phi_contact.detach() * wall_n).sum(-1, keepdim=True)
+            phi_t = phi_contact.detach() - phi_n * wall_n
+            wg = w_c * gate
+            num = (wg * phi_t.norm(dim=-1, keepdim=True)).sum()
+            den = (wg * phi_n.clamp_min(0.0)).sum()
+            mu_implied = float(num / den) if float(den) > self.eps else float('nan')
+    
+            return dict(gate_frac=gate_frac,
+                        slip_v0=float(self.slip_v0),
+                        slip_tau=float(self.slip_tau),
+                        pct=pct, counterfactual=cf,
+                        mu_implied=mu_implied, mu_param=float(self.mu),
+                        n_contact_nodes=float(contact_mass), dt=dt)
+    
+    
+    def fmt_slip_gate_report(r):
+        """Two lines for the epoch log. Import alongside PhysicsLosses."""
+        dt = r["dt"]
+        to_ms = (lambda x: x / dt) if dt else (lambda x: float('nan'))
+        u = "m/s" if dt else "m/step"
+        conv = to_ms if dt else (lambda x: x)
+        p = r["pct"]
+        cf = r["counterfactual"]
+        return (
+            f"  Slip gate | OPEN {r['gate_frac']:6.1%} of contact weight  "
+            f"| v0={conv(r['slip_v0']):.3f} {u}  "
+            f"| contact slip p10/p50/p90/p99 = "
+            f"{conv(p[10]):.3f}/{conv(p[50]):.3f}/{conv(p[90]):.3f}/{conv(p[99]):.3f} {u}\n"
+            f"            | if v0 were /3: {cf[3.0]:5.1%}   /10: {cf[10.0]:5.1%}   "
+            f"/30: {cf[30.0]:5.1%}   "
+            f"| mu implied by predicted forces = {r['mu_implied']:.3f} "
+            f"(mu param = {r['mu_param']:.3f})"
+        )
+
     # ------------------------------------------------------------------
     # h_pen  (proposal Eq. 5, second term) - architectural, no code needed.
     # softplus in force_gns.assemble_contact_forces makes phi_n >= 0 always,
