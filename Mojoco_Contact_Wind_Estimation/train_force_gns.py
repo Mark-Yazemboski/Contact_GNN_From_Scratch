@@ -372,11 +372,16 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
         else:
             step_losses.append(((pred_nodes - true_nodes)
                                 / BLOCK_WIDTH_FOR_LOSS).pow(2).mean())
+            
+        v_node = pos_window[-1] - pos_window[-2]              # m/step
+        if phys is not None and k == 0:
+            phys.last_slip_report = phys.slip_gate_report(
+                parts["phi_contact"], c_w, v_node, wall_n, dt=dt)
 
         if any_phys:
             # See physics_losses.py for the full documentation of each term
             # and the mapping to the proposal's Eq. (5).
-            v_node = pos_window[-1] - pos_window[-2]              # m/step
+            
             drag_target = drag_accel_step(
                 wind, (com_curr - com_prev).detach(), dt, k_over_m).detach()
             # For the physics terms, build the fluid total with the DETACHED
@@ -390,8 +395,10 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
             step_raws = phys.compute_step_terms(
                 parts["phi_contact"], c_w, v_node, wall_n,
                 fluid_total_phys, alpha_fluid, drag_target, phys_weights)
+            
             for kname, v in step_raws.items():
                 raw_accum[kname] = raw_accum.get(kname, 0.0) + v
+
 
         pos_window = pos_window[1:] + [pred_nodes]
         com_prev, com_curr = com_curr, com_next
@@ -833,6 +840,9 @@ def train_force_gnn(Wall,
         if scheduler is not None:
             scheduler.step()
 
+        if phys is not None and getattr(phys, "last_slip_report", None) is not None:
+                        print(PhysicsLosses.fmt_slip_gate_report(phys.last_slip_report))
+
         if any_phys and phys_accum:
             nb = max(num_batches, 1)
             line = " | ".join(f"{k}: {v/nb:.3e}" for k, v in sorted(phys_accum.items()))
@@ -841,6 +851,7 @@ def train_force_gnn(Wall,
                 mu_trace.append((epoch + 1, float(phys.mu)))
                 print(f"  recovered mu = {float(phys.mu):.4f}"
                       f"   (data generator used 0.198 for the replica sets)")
+            
 
         if epoch % validation_check_interval == 0:
             rollout_center, rollout_angle = rollout_force_batched(
