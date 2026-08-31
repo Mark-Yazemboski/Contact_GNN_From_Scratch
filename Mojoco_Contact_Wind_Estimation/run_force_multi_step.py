@@ -39,7 +39,7 @@ Floor = wall.wall(center_position=(0, 0, 0), size=(2, 2), normal=(0, 0, 1))
 
 # Point this at a *_wrench folder once add_wrench_labels.py has run, so the
 # same files carry ground-truth wrenches for evaluate_force_model.py.
-trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_0_wind")
+trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica_20_wind")
 
 Num_total_trajectories = 569
 training_percentage = 0.5
@@ -153,8 +153,8 @@ loss_mode = "accel"
 w_diss = 1e-3          # gamma_1: Coulomb dissipation on sliding contact
 w_sparse = 0.0         # contact sparsity - leave off initially (shrinks
                        # legitimate resting normal forces too)
-w_fluid_anchor = 1e-2  # gamma_3a: fluid FORCE == analytic drag law
-w_fluid_smooth = 1e-2  # gamma_3b: fluid force smooth in time (K >= 2 only)
+w_fluid_anchor = 3e-2  # gamma_3a: fluid FORCE == analytic drag law   3e-2 best
+w_fluid_smooth = 3e-2 # gamma_3b: fluid force smooth in time (K >= 2 only)   3e-2 best
 
 MU_INIT = 0.3          # friction coefficient init
 LEARN_MU = True        # recover mu from data (the drag-coefficient story)
@@ -163,7 +163,7 @@ FIX_MU = None          # or e.g. 1.9/9.615 to hard-fix it (ablation arm)
 # ----------------------------------------------------------------------
 # Naming / paths
 # ----------------------------------------------------------------------
-extra_name = "force_phys_loss"      # CHANGE PER EXPERIMENT
+extra_name = "force_phys_loss_zero_Weight"      # CHANGE PER EXPERIMENT
 model_folder_path = os.path.join(script_dir, "models", extra_name)
 os.makedirs(model_folder_path, exist_ok=True)
 save_model_path = os.path.join(
