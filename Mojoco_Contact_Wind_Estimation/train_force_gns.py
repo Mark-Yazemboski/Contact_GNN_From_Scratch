@@ -589,7 +589,12 @@ def train_force_gnn(Wall,
                     loss_mode="accel",     # "accel" (parity) or "position"
                     # --- physics-informed loss weights (proposal Eq. 6 gammas;
                     #     see physics_losses.py for each term) ---
-                    w_diss=0.0,            # gamma_1: Coulomb dissipation
+                    w_diss=0.0,            # gamma_1: JOINT Coulomb (legacy;
+                                           #   biases mu by <cos misalign>)
+                    w_fric_dir=0.0,        # gamma_1a: Coulomb DIRECTION half
+                    w_fric_mag=0.0,        # gamma_1b: Coulomb MAGNITUDE half
+                                           #   (mu's only gradient path)
+                    w_fric_cone=0.0,       # gamma_1c: cone bound, static too
                     w_sparse=0.0,          # contact sparsity (Fig. 1)
                     w_fluid_anchor=0.0,    # gamma_3a: fluid force == analytic drag law
                     w_fluid_smooth=0.0,    # gamma_3b: fluid smooth in time (K>=2)
@@ -628,9 +633,14 @@ def train_force_gnn(Wall,
           + ("   (per-node acceleration MSE, same objective as "
              "_unroll_chain_loss_accel)" if loss_mode == "accel"
              else "   (position MSE in block widths)"))
-    print(f"  physics-loss weights: diss={w_diss} sparse={w_sparse} "
+    print(f"  physics-loss weights: diss={w_diss} fric_dir={w_fric_dir} "
+          f"fric_mag={w_fric_mag} fric_cone={w_fric_cone} sparse={w_sparse} "
           f"fluid_anchor={w_fluid_anchor} "
           f"fluid_smooth={w_fluid_smooth}")
+    if w_diss > 0 and (w_fric_dir > 0 or w_fric_mag > 0):
+        print("  WARNING: w_diss is the JOINT Coulomb term and w_fric_dir/mag "
+              "are its split replacement.\n           Running both double-counts "
+              "friction and re-biases mu. Use one or the other.")
     if meta:
         print(f"  replica_physics found in data: {meta}")
     print("=" * 70)
@@ -671,6 +681,8 @@ def train_force_gnn(Wall,
 
     # ---------------- physics-informed loss module ----------------
     phys_weights = dict(w_diss=w_diss, w_sparse=w_sparse,
+                        w_fric_dir=w_fric_dir, w_fric_mag=w_fric_mag,
+                        w_fric_cone=w_fric_cone,
                         w_fluid_anchor=w_fluid_anchor,
                         w_fluid_smooth=w_fluid_smooth)
     phys = PhysicsLosses(phi_g=gravity * dt * dt, ang_scale_vec=ang_scale_vec,
@@ -697,6 +709,8 @@ def train_force_gnn(Wall,
                      scale_vec=scale_vec, ang_scale_vec=ang_scale_vec,
                      loss_mode=loss_mode,
                      w_diss=w_diss, w_sparse=w_sparse,
+                     w_fric_dir=w_fric_dir, w_fric_mag=w_fric_mag,
+                     w_fric_cone=w_fric_cone,
                      w_fluid_anchor=w_fluid_anchor,
                      w_fluid_smooth=w_fluid_smooth,
                      mu_init=mu_init, learn_mu=learn_mu, fix_mu=fix_mu,
@@ -848,9 +862,16 @@ def train_force_gnn(Wall,
             line = " | ".join(f"{k}: {v/nb:.3e}" for k, v in sorted(phys_accum.items()))
             print(f"  Physics terms (raw) | {line}")
             if fix_mu is None and learn_mu:
-                mu_trace.append((epoch + 1, float(phys.mu)))
-                print(f"  recovered mu = {float(phys.mu):.4f}"
-                      f"   (data generator used 0.198 for the replica sets)")
+                mu_trace.append((epoch + 1, float(phys.mu.detach())))
+                drives_mu = (w_diss > 0) or (w_fric_mag > 0)
+                tag = ("" if drives_mu else
+                       "  [NO GRADIENT PATH - frozen at mu_init; "
+                       "needs w_diss or w_fric_mag]")
+                bias = ("  [JOINT term: biased low by <cos misalign>]"
+                        if w_diss > 0 and w_fric_mag == 0 else "")
+                print(f"  recovered mu = {float(phys.mu.detach()):.4f}"
+                      f"   (data generator used 0.198 for the replica sets)"
+                      f"{tag}{bias}")
             
 
         if epoch % validation_check_interval == 0:

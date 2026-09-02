@@ -87,6 +87,7 @@ predicted forces given the observed motion; they must not create an incentive
 to change the motion to relax the constraint.
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -173,6 +174,7 @@ class PhysicsLosses(nn.Module):
         norm = c_w.detach().sum() + self.eps
         return (w * resid.pow(2).sum(-1, keepdim=True)).sum() / norm
 
+    @torch.no_grad()
     def slip_gate_report(self, phi_contact, c_w, v_node, wall_n, dt=None):
             """Is h_dissipation awake? Mirrors h_dissipation's gating exactly.
     
@@ -189,6 +191,7 @@ class PhysicsLosses(nn.Module):
             v = v_node.detach()
             v_t = v - (v * wall_n).sum(-1, keepdim=True) * wall_n
             speed = v_t.norm(dim=-1, keepdim=True)                 # (B,N,1) m/step
+            v_hat_d = v_t / (speed + self.eps)
             gate = torch.sigmoid((speed - self.slip_v0) / self.slip_tau)
     
             w_c = c_w.detach()
@@ -222,18 +225,35 @@ class PhysicsLosses(nn.Module):
             phi_n = (phi_contact.detach() * wall_n).sum(-1, keepdim=True)
             phi_t = phi_contact.detach() - phi_n * wall_n
             wg = w_c * gate
-            num = (wg * phi_t.norm(dim=-1, keepdim=True)).sum()
+            mag = phi_t.norm(dim=-1, keepdim=True)
+            num = (wg * mag).sum()
             den = (wg * phi_n.clamp_min(0.0)).sum()
             mu_implied = float(num / den) if float(den) > self.eps else float('nan')
-    
+
+            # DIRECTIONAL alignment, measured directly instead of inferred from
+            # the mu_param/mu_implied ratio. +1 = friction exactly opposes slip
+            # (perfect Coulomb), 0 = perpendicular, -1 = friction DRIVES the
+            # slip. Magnitude-weighted, so a negligible misaimed force does not
+            # drag the average down. This is the crossing-arrow defect as a
+            # scalar: mu_param = mu_implied * mean_align.
+            align = -(phi_t * v_hat_d).sum(-1, keepdim=True) / (mag + self.eps)
+            wgm = wg * mag
+            mean_align = (float((wgm * align).sum() / wgm.sum())
+                          if float(wgm.sum()) > self.eps else float('nan'))
+
             return dict(gate_frac=gate_frac,
                         slip_v0=float(self.slip_v0),
                         slip_tau=float(self.slip_tau),
                         pct=pct, counterfactual=cf,
                         mu_implied=mu_implied, mu_param=float(self.mu),
+                        mean_align=mean_align,
+                        misalign_deg=float(np.degrees(np.arccos(
+                            min(1.0, max(-1.0, mean_align)))))
+                        if mean_align == mean_align else float('nan'),
                         n_contact_nodes=float(contact_mass), dt=dt)
     
     
+    @staticmethod
     def fmt_slip_gate_report(r):
         """Two lines for the epoch log. Import alongside PhysicsLosses."""
         dt = r["dt"]
@@ -250,8 +270,109 @@ class PhysicsLosses(nn.Module):
             f"            | if v0 were /3: {cf[3.0]:5.1%}   /10: {cf[10.0]:5.1%}   "
             f"/30: {cf[30.0]:5.1%}   "
             f"| mu implied by predicted forces = {r['mu_implied']:.3f} "
-            f"(mu param = {r['mu_param']:.3f})"
+            f"(mu param = {r['mu_param']:.3f})\n"
+            f"            | friction alignment = {r['mean_align']:+.3f} "
+            f"({r['misalign_deg']:.0f} deg off anti-parallel; 1.000 = perfect Coulomb)"
         )
+
+
+    # ==================================================================
+    # SPLIT COULOMB  (replaces the joint h_dissipation above)
+    # ------------------------------------------------------------------
+    # h_dissipation minimizes || phi_t + mu phi_n vhat ||^2, one squared
+    # residual over a VECTOR. That couples magnitude and direction through a
+    # single global scalar, and mu can only absorb the coupling one way:
+    #
+    #     mu*  =  -sum w phi_n (phi_t . vhat) / sum w phi_n^2
+    #          =  mu_true * <cos(misalignment)>
+    #
+    # Verified numerically: at 44 deg of misalignment the joint term reports
+    # mu = 0.140 where the truth is 0.198, while a magnitude-only term reports
+    # 0.198 at ANY misalignment. Splitting therefore does two things at once:
+    # it de-biases the recovered friction coefficient, and it isolates a term
+    # whose only job is fixing the crossing-arrow defect.
+    # ==================================================================
+    def h_friction_direction(self, phi_contact, c_w, v_node, wall_n):
+        """DIRECTION half of Coulomb: friction opposes THAT node's own slip.
+
+        No mu appears, so alignment error cannot leak into the mu estimate.
+        Correct under spin: each node is compared against its own local slip
+        direction, so the genuine fanning-out of friction on a yawing cube is
+        allowed, unlike a global "all frictions parallel" penalty.
+
+        The per-node cost is  ||phi_t|| * (1 + phi_hat_t . vhat), which is 0
+        when friction exactly opposes slip and 2||phi_t|| when it drives it.
+        Weighting by magnitude means a large misaimed force is expensive and a
+        negligible one is nearly free. LINEAR, not squared: the constant
+        gradient keeps pushing all the way to alignment, the same reason L1
+        drives exact sparsity where L2 only shrinks.
+
+        Returns a scalar in units of phi_g.
+        """
+        v = v_node.detach()
+        v_t = v - (v * wall_n).sum(-1, keepdim=True) * wall_n
+        speed = v_t.norm(dim=-1, keepdim=True)
+        v_hat = v_t / (speed + self.eps)
+        slip_gate = torch.sigmoid((speed - self.slip_v0) / self.slip_tau)
+
+        phi_n = (phi_contact * wall_n).sum(-1, keepdim=True)
+        phi_t = phi_contact - phi_n * wall_n
+        mag = phi_t.norm(dim=-1, keepdim=True)
+        misalign = 1.0 + (phi_t * v_hat).sum(-1, keepdim=True) / (mag + self.eps)
+
+        w = (c_w * slip_gate).detach()
+        return (w * (mag / self.phi_g) * misalign).sum() / (c_w.detach().sum() + self.eps)
+
+    def h_friction_magnitude(self, phi_contact, c_w, v_node, wall_n):
+        """MAGNITUDE half of Coulomb: ||phi_t|| = mu * phi_n while sliding.
+
+        This is mu's ONLY gradient path in the split formulation. Because the
+        direction is excluded, mu converges to the friction coefficient itself
+        rather than to mu * <cos misalignment>, so `recovered mu` becomes a
+        measurement of friction instead of a measurement of friction times
+        alignment.
+
+        Same gating and normalization as h_dissipation, so their raw
+        magnitudes are directly comparable in the epoch log.
+        """
+        v = v_node.detach()
+        v_t = v - (v * wall_n).sum(-1, keepdim=True) * wall_n
+        speed = v_t.norm(dim=-1, keepdim=True)
+        slip_gate = torch.sigmoid((speed - self.slip_v0) / self.slip_tau)
+
+        phi_n = (phi_contact * wall_n).sum(-1, keepdim=True)
+        phi_t = phi_contact - phi_n * wall_n
+        resid = (phi_t.norm(dim=-1, keepdim=True) - self.mu * phi_n) / self.phi_g
+
+        w = (c_w * slip_gate).detach()
+        return (w * resid.pow(2)).sum() / (c_w.detach().sum() + self.eps)
+
+    def h_friction_cone(self, phi_contact, c_w, wall_n):
+        """The COULOMB CONE bound  ||phi_t|| <= mu * phi_n.
+
+        The other half of Coulomb friction, and the half that has been missing.
+        h_dissipation / h_friction_* enforce the SLIDING equality and are
+        therefore gated off below slip_v0 - which leaves the STATIC regime, the
+        settled frames where the rollout jitters, with no constraint on
+        friction whatsoever. The cone is an INEQUALITY, valid in both regimes:
+        it says nothing about direction and only bounds magnitude, so it cannot
+        over-constrain static contact the way the equality would.
+
+        Gated by contact weight ONLY - no slip gate. Satisfied forces cost
+        exactly zero (hinge), so this is free wherever the model is already
+        physical.
+
+        mu is DETACHED here. With gradient, the cheapest way to reduce a hinge
+        penalty is to inflate mu until the constraint is never active, which
+        would destroy the mu measurement that h_friction_magnitude provides.
+        """
+        mu = self.mu.detach()
+        phi_n = (phi_contact * wall_n).sum(-1, keepdim=True)
+        phi_t = phi_contact - phi_n * wall_n
+        excess = phi_t.norm(dim=-1, keepdim=True) - mu * phi_n.clamp_min(0.0)
+
+        w = c_w.detach()
+        return (w * (excess.clamp_min(0.0) / self.phi_g).pow(2)).sum() / (w.sum() + self.eps)
 
     # ------------------------------------------------------------------
     # h_pen  (proposal Eq. 5, second term) - architectural, no code needed.
@@ -366,6 +487,14 @@ class PhysicsLosses(nn.Module):
         raws = {}
         if weights.get("w_diss", 0) > 0:
             raws["diss"] = self.h_dissipation(phi_contact, c_w, v_node, wall_n)
+        if weights.get("w_fric_dir", 0) > 0:
+            raws["fric_dir"] = self.h_friction_direction(
+                phi_contact, c_w, v_node, wall_n)
+        if weights.get("w_fric_mag", 0) > 0:
+            raws["fric_mag"] = self.h_friction_magnitude(
+                phi_contact, c_w, v_node, wall_n)
+        if weights.get("w_fric_cone", 0) > 0:
+            raws["fric_cone"] = self.h_friction_cone(phi_contact, c_w, wall_n)
         if weights.get("w_fluid_anchor", 0) > 0:
             raws["fluid_anchor"] = self.h_fluid_anchor(a_fluid_total, drag_target)
         if weights.get("w_sparse", 0) > 0:
