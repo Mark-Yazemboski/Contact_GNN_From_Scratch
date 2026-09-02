@@ -261,11 +261,25 @@ def assemble_contact_forces(contact_raw, c_w, wall_normal, scale_vec):
     n_hat = wall_normal / wall_normal.norm().clamp_min(1e-12)
     t_raw = contact_raw[..., 0:3]
     n_raw = contact_raw[..., 3:4]
-    t_vec = t_raw - (t_raw * n_hat).sum(-1, keepdim=True) * n_hat
-    n_mag = torch.nn.functional.softplus(n_raw)
-    phi_c = c_w * (t_vec + n_mag * n_hat) * scale_vec
+
+    # Scale BEFORE projecting. scale_vec is an elementwise world-frame scale,
+    # and elementwise scaling does not commute with projection unless the wall
+    # normal lies along a coordinate axis: with s = [s_xy, s_xy, s_z] and a
+    # tilted n_hat, sum_k t_k n_k = 0 does NOT imply sum_k s_k t_k n_k = 0, so
+    # the tangential head could inject a normal component and defeat the
+    # softplus. Scaling first makes the projection exact for ANY wall normal.
+    # Bit-identical to the previous order for axis-aligned walls (floor
+    # (0,0,1), vertical inspection wall (1,0,0)); differs only on a ramp.
+    t_scaled = t_raw * scale_vec
+    t_vec = t_scaled - (t_scaled * n_hat).sum(-1, keepdim=True) * n_hat
+
+    # Output scale along the wall normal. Reduces to scale_vec[2] for a floor.
+    s_n = (scale_vec * n_hat).norm()
+    n_mag = torch.nn.functional.softplus(n_raw) * s_n
+
+    phi_c = c_w * (t_vec + n_mag * n_hat)
     parts = {"phi_contact": phi_c,
-             "normal_mag": n_mag * scale_vec[2],
+             "normal_mag": n_mag,
              "contact_weight": c_w}
     return phi_c, parts
 
