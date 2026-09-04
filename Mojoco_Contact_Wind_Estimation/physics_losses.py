@@ -182,6 +182,7 @@ class PhysicsLosses(nn.Module):
 
     def __init__(self, phi_g, ang_scale_vec,
                  mu_init=0.2, learn_mu=True, fixed_mu=None,
+                 k_init=0.0285, learn_k=False, fixed_k=None,
                  slip_v0=1e-3, slip_tau=1e-4, eps=1e-9):
         super().__init__()
         self.register_buffer("phi_g", torch.as_tensor(float(phi_g)))
@@ -194,6 +195,27 @@ class PhysicsLosses(nn.Module):
                 self.log_mu = nn.Parameter(log_mu)
             else:
                 self.register_buffer("log_mu", log_mu)
+
+        # k/m, the quadratic drag coefficient, gets exactly the same treatment
+        # as mu: log-space so it stays positive by construction, learnable so
+        # the pipeline carries no constant fitted offline against MuJoCo.
+        # Identification is the mirror of mu's: the prediction loss determines
+        # the fluid force, and the analytic drag law reads the coefficient off
+        # it. With use_drag_baseline=False the anchor makes that an explicit
+        # least-squares fit, k* = sum(a.w)/sum(w.w) with w = ||u||u, which is a
+        # one-parameter regression on a single basis function - unbiased at
+        # 100% noise on the fluid head in simulation. With the baseline ON the
+        # anchor reduces to ||residual||^2 and k cancels out of it, so k is
+        # identified only through the prediction loss and only insofar as the
+        # anchor suppresses the residual. Baseline OFF is the clean case.
+        self.fixed_k = fixed_k
+        if fixed_k is None:
+            log_k = torch.log(torch.tensor(float(k_init)))
+            if learn_k:
+                self.log_k = nn.Parameter(log_k)
+            else:
+                self.register_buffer("log_k", log_k)
+
         self.slip_v0 = slip_v0        # m/step: slip-speed gate center
         self.slip_tau = slip_tau      # m/step: gate softness
         self.eps = eps
@@ -203,6 +225,15 @@ class PhysicsLosses(nn.Module):
         if self.fixed_mu is not None:
             return torch.as_tensor(self.fixed_mu, device=self.phi_g.device)
         return torch.exp(self.log_mu)
+
+    @property
+    def k_over_m(self):
+        """Quadratic drag coefficient k/m, as a tensor. drag_accel_step()
+        multiplies by it, so passing this instead of a float is all that is
+        needed to put k in the graph."""
+        if self.fixed_k is not None:
+            return torch.as_tensor(self.fixed_k, device=self.phi_g.device)
+        return torch.exp(self.log_k)
 
     # ------------------------------------------------------------------
     # h_diss  (proposal Eq. 5, first term)

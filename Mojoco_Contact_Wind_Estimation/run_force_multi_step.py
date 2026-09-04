@@ -123,7 +123,17 @@ MASS = 0.37
 use_wind_feature = True        # Stage 1: off. Stage 2+: on for wind datasets.
 use_drag_baseline = True        # analytic drag at COM (calibrated k/m); the
                                 # anchor term assumes this is the fluid center
-K_OVER_M = 0.0285               # from wind_error_analysis.py drag calibration
+K_OVER_M = 0.0285      # k/m INIT. Was a hardcoded constant fitted offline
+                       # against MuJoCo by wind_error_analysis.py - which is
+                       # exactly the kind of thing that will not transfer to
+                       # hardware. With LEARN_K it becomes a recovered physical
+                       # parameter, same treatment as mu.
+LEARN_K = False        # recover k/m from data. NOTE: cleanly identified only
+                       # with use_drag_baseline=False, where the anchor becomes
+                       # an explicit least-squares fit of k to the learned fluid
+                       # force. With the baseline ON the anchor is ||residual||^2
+                       # and k cancels out of it.
+FIX_K = None           # or a float to hard-fix k (the +/-50% sensitivity arms)
 
 contact_d0 = 0.02               # soft geometric contact gate center (m)
 contact_tau = 0.005             # gate width (m)
@@ -158,9 +168,9 @@ loss_mode = "accel"
 # Measured on this dataset: mu_param 0.156 vs mu_implied 0.216 -> ~44 deg of
 # mean misalignment. Use the SPLIT pair instead; keep w_diss for the ablation.
 w_diss = 0.0           # gamma_1  : JOINT Coulomb (legacy / ablation arm)
-w_fric_dir = 1e-8       # gamma_1a : direction half - fixes crossing arrows
-w_fric_mag = 1e-8       # gamma_1b : magnitude half - mu's ONLY gradient path
-w_fric_cone= 1e-8       # gamma_1c : ||phi_t|| <= mu phi_n, STATIC regime too
+w_fric_dir = .3       # gamma_1a : direction half - fixes crossing arrows
+w_fric_mag = 1       # gamma_1b : magnitude half - mu's ONLY gradient path
+w_fric_cone= 1.5       # gamma_1c : ||phi_t|| <= mu phi_n, STATIC regime too
 w_sparse = 0.0         # contact sparsity - leave off (shrinks legitimate
                        # resting normal forces too)
 
@@ -234,7 +244,7 @@ if Train_model:
         gravity=GRAVITY,
         mass=MASS,
         use_drag_baseline=use_drag_baseline,
-        k_over_m=K_OVER_M,
+        k_over_m=K_OVER_M, learn_k=LEARN_K, fix_k=FIX_K,
         contact_d0=contact_d0,
         contact_tau=contact_tau,
         loss_mode=loss_mode,
@@ -301,7 +311,7 @@ if Evaluate_model:
             loss_mode=loss_mode,
             use_wind=use_wind_feature,
             use_drag_baseline=use_drag_baseline,
-            k_over_m=K_OVER_M,
+            k_over_m=K_OVER_M, learn_k=LEARN_K, fix_k=FIX_K,
             contact_d0=contact_d0,
             contact_tau=contact_tau,
             dt=DT, gravity=GRAVITY, mass=MASS,

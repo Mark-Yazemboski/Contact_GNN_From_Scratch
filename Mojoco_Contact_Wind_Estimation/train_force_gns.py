@@ -583,7 +583,9 @@ def train_force_gnn(Wall,
                     gravity=None,                  # None -> read from replica_physics, else 9.615
                     mass=0.37,
                     use_drag_baseline=False,
-                    k_over_m=0.0285,
+                    k_over_m=0.0285,       # k/m INIT (learnable if learn_k)
+                    learn_k=False,         # recover k/m from data, like mu
+                    fix_k=None,            # or hard-fix it (ablation arm)
                     contact_d0=0.02,
                     contact_tau=0.005,
                     loss_mode="accel",     # "accel" (parity) or "position"
@@ -627,7 +629,8 @@ def train_force_gnn(Wall,
     print("=" * 70)
     print("FORCE-MODEL PHYSICS (must match the data generator):")
     print(f"  gravity = {gravity:.4f} m/s^2   dt = {dt:.6f} s   mass = {mass:.3f} kg")
-    print(f"  drag baseline = {use_drag_baseline} (k/m = {k_over_m})   "
+    print(f"  drag baseline = {use_drag_baseline} (k/m init = {k_over_m}"
+          f"{', LEARNABLE' if learn_k and fix_k is None else ''})   "
           f"contact gate d0/tau = {contact_d0}/{contact_tau} m")
     print(f"  loss_mode = {loss_mode}"
           + ("   (per-node acceleration MSE, same objective as "
@@ -687,7 +690,17 @@ def train_force_gnn(Wall,
                         w_fluid_smooth=w_fluid_smooth)
     phys = PhysicsLosses(phi_g=gravity * dt * dt, ang_scale_vec=ang_scale_vec,
                          mu_init=mu_init, learn_mu=learn_mu, fixed_mu=fix_mu,
+                         k_init=k_over_m, learn_k=learn_k, fixed_k=fix_k,
                          slip_v0=slip_v0, slip_tau=slip_tau)
+    # k_eff is what every drag_accel_step call receives. As a TENSOR it carries
+    # gradient into log_k; as a float it behaves exactly as before.
+    k_eff = phys.k_over_m if (learn_k and fix_k is None) else k_over_m
+    if learn_k and fix_k is None and use_drag_baseline:
+        print("  WARNING: learn_k with use_drag_baseline=True. The anchor then\n"
+              "           reduces to ||residual||^2, which k cancels out of, so\n"
+              "           k is identified only through the prediction loss and\n"
+              "           only insofar as the anchor suppresses the residual.\n"
+              "           use_drag_baseline=False is the cleanly identified case.")
     any_phys = any(v > 0 for v in phys_weights.values())
     if any_phys:
         print(f"  physics losses ON: {[k for k, v in phys_weights.items() if v > 0]}"
@@ -700,6 +713,7 @@ def train_force_gnn(Wall,
 
     force_cfg = dict(dt=dt, gravity=gravity, mass=mass,
                      use_drag_baseline=use_drag_baseline, k_over_m=k_over_m,
+                     learn_k=learn_k, fix_k=fix_k,
                      contact_d0=contact_d0, contact_tau=contact_tau,
                      h=h, use_wind=use_wind, latent_dim=latent_dim,
                      L=message_passing_layers, K=repeat_blocks,
@@ -781,6 +795,7 @@ def train_force_gnn(Wall,
     train_loss_epochs, train_loss_values = [], []
     val_loss_epochs, val_loss_values = [], []
     mu_trace = []
+    k_trace = []
     best_val_loss, best_val_epoch = float("inf"), -1
     loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
 
@@ -822,7 +837,7 @@ def train_force_gnn(Wall,
                 x_mean_g, x_std_g, e_mean_g, e_std_g, scale_vec_g,
                 ang_scale_vec_g, acc_mean_g, acc_std_g, g_step_g, dt,
                 use_wind=use_wind, use_drag_baseline=use_drag_baseline,
-                k_over_m=k_over_m, contact_d0=contact_d0, contact_tau=contact_tau,
+                k_over_m=k_eff, contact_d0=contact_d0, contact_tau=contact_tau,
                 loss_mode=loss_mode,
                 phys=phys, phys_weights=phys_weights)
 
@@ -872,6 +887,10 @@ def train_force_gnn(Wall,
                 print(f"  recovered mu = {float(phys.mu.detach()):.4f}"
                       f"   (data generator used 0.198 for the replica sets)"
                       f"{tag}{bias}")
+            if fix_k is None and learn_k:
+                k_trace.append((epoch + 1, float(phys.k_over_m.detach())))
+                print(f"  recovered k/m = {float(phys.k_over_m.detach()):.5f}"
+                      f"   (wind_error_analysis.py calibrated 0.0285)")
             
 
         if epoch % validation_check_interval == 0:
@@ -880,7 +899,9 @@ def train_force_gnn(Wall,
                 x_mean_g, x_std_g, e_mean_g, e_std_g, scale_vec_g,
                 ang_scale_vec_g, g_step_g, dt,
                 device, use_wind=use_wind, use_drag_baseline=use_drag_baseline,
-                k_over_m=k_over_m, contact_d0=contact_d0, contact_tau=contact_tau,
+                k_over_m=(float(phys.k_over_m.detach())
+                          if (learn_k and fix_k is None) else k_over_m),
+                contact_d0=contact_d0, contact_tau=contact_tau,
                 mass=mass)
             print(f"  Rollout val | center: {rollout_center:.4f} | angle: {rollout_angle:.2f}")
             avg_val_loss = rollout_center
@@ -936,12 +957,18 @@ def train_force_gnn(Wall,
     phys_path = os.path.splitext(save_model_path)[0] + "_physics.pt"
     torch.save({"state_dict": phys.state_dict(),
                 "recovered_mu": float(phys.mu),
+                "recovered_k_over_m": float(phys.k_over_m.detach()),
+                "k_mode": ("fixed" if fix_k is not None
+                           else "learnable" if learn_k else "frozen"),
                 "mu_mode": ("fixed" if fix_mu is not None
                             else "learnable" if learn_mu else "frozen"),
                 "weights": phys_weights}, phys_path)
     if any_phys and fix_mu is None and learn_mu:
         print(f"Recovered friction coefficient mu = {float(phys.mu):.4f} "
               f"(saved to {phys_path})")
+    if learn_k and fix_k is None:
+        print(f"Recovered drag coefficient k/m = {float(phys.k_over_m.detach()):.5f} "
+              f"(init / calibrated value was {k_over_m})")
     torch.save({"train_loss_epochs": train_loss_epochs,
                 "train_loss_values": train_loss_values,
                 "val_loss_epochs": val_loss_epochs,
@@ -950,6 +977,7 @@ def train_force_gnn(Wall,
                 "best_val_loss": best_val_loss,
                 "best_val_epoch": best_val_epoch,
                 "mu_trace": mu_trace,
+                "k_trace": k_trace,
                 "global_step": global_step}, loss_history_path)
     print(f"Loss history saved to {loss_history_path} "
           f"(total optimizer steps: {global_step})")
