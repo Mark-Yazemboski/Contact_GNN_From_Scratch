@@ -87,9 +87,82 @@ predicted forces given the observed motion; they must not create an incentive
 to change the motion to relax the constraint.
 """
 
+from collections import deque
+
 import numpy as np
 import torch
 import torch.nn as nn
+
+
+
+# ======================================================================
+# DIAGNOSTIC HISTORY  (module-level, so the run script can read it after
+# train_force_gnn returns without the trainer having to hand it back)
+# ----------------------------------------------------------------------
+# slip_gate_report() appends to DIAG_HISTORY on every call, so the alignment
+# / mu_implied / gate-occupancy trace accumulates for free. The per-epoch
+# numbers come from ONE batch and are noisy (measured spread: alignment
+# 0.726 +/- 0.094, with a 0.503 outlier), so summarize_diagnostics()
+# averages the tail rather than reporting the last value.
+#
+# RAW_HISTORY is optional: if the trainer calls push_raw_terms(raw_terms)
+# once per epoch, the physics-term magnitudes land in the CSV too. Those
+# were the strongest signal in the DIR arm (fric_dir 1.48e-2 -> 6.9e-3 with
+# no overlap between arms), so they are worth recording.
+# ======================================================================
+DIAG_HISTORY = deque(maxlen=200)
+RAW_HISTORY = deque(maxlen=200)
+
+
+def push_raw_terms(raw_terms):
+    """Optional trainer hook: record one epoch of raw physics-term values.
+    raw_terms: {name: float} - the same dict the trainer prints."""
+    if raw_terms:
+        RAW_HISTORY.append({k: float(v) for k, v in raw_terms.items()})
+
+
+def reset_diagnostics():
+    """Clear both buffers. Call at the start of a run if several trainings
+    share one Python process."""
+    DIAG_HISTORY.clear()
+    RAW_HISTORY.clear()
+
+
+def summarize_diagnostics(last_n=20):
+    """Mean over the last `last_n` recorded epochs, for the run report.
+
+    Returns a flat dict of floats ready to drop into the settings dict.
+    Empty buffers give an empty dict, so this is safe to call unconditionally.
+    misalign_deg is arccos(mean align), NOT the mean of the per-epoch angles:
+    arccos is nonlinear, so averaging degrees would bias the result.
+    """
+    out = {}
+    if DIAG_HISTORY:
+        tail = list(DIAG_HISTORY)[-last_n:]
+        al = np.array([r["mean_align"] for r in tail], dtype=float)
+        mi = np.array([r["mu_implied"] for r in tail], dtype=float)
+        gf = np.array([r["gate_frac"] for r in tail], dtype=float)
+        al, mi, gf = al[np.isfinite(al)], mi[np.isfinite(mi)], gf[np.isfinite(gf)]
+        if al.size:
+            m = float(al.mean())
+            out["diag_align"] = m
+            out["diag_align_std"] = float(al.std(ddof=1)) if al.size > 1 else 0.0
+            out["diag_misalign_deg"] = float(
+                np.degrees(np.arccos(min(1.0, max(-1.0, m)))))
+        if mi.size:
+            out["diag_mu_implied"] = float(mi.mean())
+            out["diag_mu_implied_std"] = float(mi.std(ddof=1)) if mi.size > 1 else 0.0
+        if gf.size:
+            out["diag_gate_frac"] = float(gf.mean())
+        out["diag_n_epochs"] = len(tail)
+    if RAW_HISTORY:
+        tail = list(RAW_HISTORY)[-last_n:]
+        for k in tail[-1]:
+            v = np.array([r[k] for r in tail if k in r], dtype=float)
+            v = v[np.isfinite(v)]
+            if v.size:
+                out[f"raw_{k}"] = float(v.mean())
+    return out
 
 
 class PhysicsLosses(nn.Module):
@@ -163,7 +236,12 @@ class PhysicsLosses(nn.Module):
         phi_n = (phi_contact * wall_n).sum(-1, keepdim=True)      # signed normal
         phi_t = phi_contact - phi_n * wall_n
 
-        resid = (phi_t + self.mu * phi_n * v_hat) / self.phi_g    # (B, N, 3)
+        # phi_n is DETACHED: Coulomb says what friction may be GIVEN the
+        # normal force. Left attached, this residual carries a normal-direction
+        # gradient of size mu*|dL/dphi_t|, so the cheapest fix for
+        # ||phi_t|| != mu*phi_n is to move phi_n - a well-determined,
+        # position-loss-observable quantity - instead of the friction.
+        resid = (phi_t + self.mu * phi_n.detach() * v_hat) / self.phi_g
         # Normalize by CONTACT weight only; the slip gate lives in the
         # numerator. If it were in the denominator too, a batch where every
         # node is equally (barely) gated would cancel the gate entirely and
@@ -241,7 +319,7 @@ class PhysicsLosses(nn.Module):
             mean_align = (float((wgm * align).sum() / wgm.sum())
                           if float(wgm.sum()) > self.eps else float('nan'))
 
-            return dict(gate_frac=gate_frac,
+            report = dict(gate_frac=gate_frac,
                         slip_v0=float(self.slip_v0),
                         slip_tau=float(self.slip_tau),
                         pct=pct, counterfactual=cf,
@@ -251,6 +329,8 @@ class PhysicsLosses(nn.Module):
                             min(1.0, max(-1.0, mean_align)))))
                         if mean_align == mean_align else float('nan'),
                         n_contact_nodes=float(contact_mass), dt=dt)
+            DIAG_HISTORY.append(report)
+            return report
     
     
     @staticmethod
@@ -342,7 +422,10 @@ class PhysicsLosses(nn.Module):
 
         phi_n = (phi_contact * wall_n).sum(-1, keepdim=True)
         phi_t = phi_contact - phi_n * wall_n
-        resid = (phi_t.norm(dim=-1, keepdim=True) - self.mu * phi_n) / self.phi_g
+        # phi_n DETACHED (see h_dissipation): the normal force is the given,
+        # friction is the unknown. mu keeps its gradient - this is its only path.
+        resid = (phi_t.norm(dim=-1, keepdim=True)
+                 - self.mu * phi_n.detach()) / self.phi_g
 
         w = (c_w * slip_gate).detach()
         return (w * resid.pow(2)).sum() / (c_w.detach().sum() + self.eps)
@@ -369,7 +452,9 @@ class PhysicsLosses(nn.Module):
         mu = self.mu.detach()
         phi_n = (phi_contact * wall_n).sum(-1, keepdim=True)
         phi_t = phi_contact - phi_n * wall_n
-        excess = phi_t.norm(dim=-1, keepdim=True) - mu * phi_n.clamp_min(0.0)
+        # BOTH mu and phi_n are held fixed: the only way to satisfy the cone
+        # is to shrink the offending friction force, not to widen the cone.
+        excess = phi_t.norm(dim=-1, keepdim=True) - mu * phi_n.detach().clamp_min(0.0)
 
         w = c_w.detach()
         return (w * (excess.clamp_min(0.0) / self.phi_g).pow(2)).sum() / (w.sum() + self.eps)

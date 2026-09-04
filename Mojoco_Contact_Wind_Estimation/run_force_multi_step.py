@@ -26,6 +26,7 @@ from evaluate_force_model import evaluate_force_model
 from visualize_force_model import visualize_force_rollout
 from run_report import save_run_report
 from generate_node_states import BLOCK_HALF_WIDTH
+from physics_losses import summarize_diagnostics, reset_diagnostics
 
 
 torch.set_float32_matmul_precision('high')
@@ -150,11 +151,25 @@ loss_mode = "accel"
 #        coefficient (replica ground truth: mu = 0.198).
 #   h_pen needs no weight: normal forces are >= 0 by construction (softplus). Set each so its weighted term
 # is ~1-10% of the position loss at init; raw magnitudes print every epoch.
-w_diss = 1e-3          # gamma_1: Coulomb dissipation on sliding contact
-w_sparse = 0.0         # contact sparsity - leave off initially (shrinks
-                       # legitimate resting normal forces too)
-w_fluid_anchor = 3e-2  # gamma_3a: fluid FORCE == analytic drag law   3e-2 best
-w_fluid_smooth = 3e-2 # gamma_3b: fluid force smooth in time (K >= 2 only)   3e-2 best
+# --- CONTACT / friction ---------------------------------------------
+# w_diss is the ORIGINAL joint Coulomb term. It minimizes
+#   || phi_t + mu phi_n vhat ||^2, one squared residual over a vector, so a
+# single global mu absorbs any directional error:  mu -> mu_true * <cos>.
+# Measured on this dataset: mu_param 0.156 vs mu_implied 0.216 -> ~44 deg of
+# mean misalignment. Use the SPLIT pair instead; keep w_diss for the ablation.
+w_diss = 0.0           # gamma_1  : JOINT Coulomb (legacy / ablation arm)
+w_fric_dir = 1e-8       # gamma_1a : direction half - fixes crossing arrows
+w_fric_mag = 1e-8       # gamma_1b : magnitude half - mu's ONLY gradient path
+w_fric_cone= 1e-8       # gamma_1c : ||phi_t|| <= mu phi_n, STATIC regime too
+w_sparse = 0.0         # contact sparsity - leave off (shrinks legitimate
+                       # resting normal forces too)
+
+# --- FLUID -----------------------------------------------------------
+# The anchor ladder (Aug 28-29, 3 seeds/cell) was monotonic with no motion
+# cost: fluid_err_contact 0.1368 -> 0.0479 mg from w=0 to w=1e-1, 65% down,
+# center error flat within the baseline spread. It had NOT plateaued at 1e-1.
+w_fluid_anchor = 3e-2  # gamma_3a: fluid FORCE == analytic drag law
+w_fluid_smooth = 3e-2  # gamma_3b: fluid force smooth in time (K >= 2 only)
 
 MU_INIT = 0.3          # friction coefficient init
 LEARN_MU = True        # recover mu from data (the drag-coefficient story)
@@ -188,6 +203,8 @@ FORCE_MASTER_CSV = os.path.join(script_dir, "models", "all_force_runs_master.csv
 
 # ----------------------------------------------------------------------
 if Train_model:
+    # Clear the diagnostic buffers in case several trainings share a process.
+    reset_diagnostics()
     train_force_gnn(
         Wall=Floor,
         train_range=train_range,
@@ -222,6 +239,7 @@ if Train_model:
         contact_tau=contact_tau,
         loss_mode=loss_mode,
         w_diss=w_diss, w_sparse=w_sparse,
+        w_fric_dir=w_fric_dir, w_fric_mag=w_fric_mag, w_fric_cone=w_fric_cone,
         w_fluid_anchor=w_fluid_anchor,
         w_fluid_smooth=w_fluid_smooth,
         mu_init=MU_INIT, learn_mu=LEARN_MU, fix_mu=FIX_MU,
@@ -246,6 +264,19 @@ if Evaluate_model:
                          for k, v in metrics.items()})
 
     if Save_run_report:
+        # Mean over the last 20 epochs of the per-epoch diagnostics that
+        # slip_gate_report() accumulated during training: friction alignment,
+        # mu_implied, slip-gate occupancy, and (if the trainer pushes them)
+        # the raw physics-term magnitudes. These are the metrics the friction
+        # sweep is ranked on, so they belong in the same CSV row as
+        # force_contact_err_contact instead of only in the log.
+        # Averaged, not final-value: one batch per epoch is noisy.
+        diagnostics = summarize_diagnostics(last_n=20)
+        print("\nEnd-of-run diagnostics (mean of last "
+              f"{diagnostics.get('diag_n_epochs', 0)} epochs):")
+        for k, v in sorted(diagnostics.items()):
+            print(f"    {k:<22} {v:.6g}")
+
         settings = dict(
             architecture="force",           # distinguishes these rows at a glance
             dataset=trajectory_folder,
@@ -275,9 +306,12 @@ if Evaluate_model:
             contact_tau=contact_tau,
             dt=DT, gravity=GRAVITY, mass=MASS,
             w_diss=w_diss, w_sparse=w_sparse,
+            w_fric_dir=w_fric_dir, w_fric_mag=w_fric_mag,
+            w_fric_cone=w_fric_cone,
             w_fluid_anchor=w_fluid_anchor,
             w_fluid_smooth=w_fluid_smooth,
             learn_mu=LEARN_MU, fix_mu=FIX_MU,
+            **diagnostics,
         )
         save_run_report(model_folder_path, settings, metrics, slopes=[],
                         run_name=extra_name, master_csv=FORCE_MASTER_CSV)
