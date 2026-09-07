@@ -692,9 +692,19 @@ def train_force_gnn(Wall,
                          mu_init=mu_init, learn_mu=learn_mu, fixed_mu=fix_mu,
                          k_init=k_over_m, learn_k=learn_k, fixed_k=fix_k,
                          slip_v0=slip_v0, slip_tau=slip_tau)
-    # k_eff is what every drag_accel_step call receives. As a TENSOR it carries
-    # gradient into log_k; as a float it behaves exactly as before.
-    k_eff = phys.k_over_m if (learn_k and fix_k is None) else k_over_m
+    # What every drag_accel_step call receives. MUST be evaluated fresh at each
+    # use, never cached: phys.k_over_m is a property that computes
+    # exp(log_k) on the spot, so a cached copy would (a) freeze k at its init
+    # value for the whole run, since the tensor is materialized once, and
+    # (b) be built before phys.to(device), leaving a CPU node in a CUDA graph
+    # whose backward writes a CPU gradient into a CUDA parameter - which
+    # surfaces as an Adam device assert on the first optimizer.step().
+    _k_learnable = (learn_k and fix_k is None)
+
+    def k_now():
+        """Live k/m. Tensor (carries gradient into log_k) when learnable,
+        otherwise the plain float, which behaves exactly as before."""
+        return phys.k_over_m if _k_learnable else k_over_m
     if learn_k and fix_k is None and use_drag_baseline:
         print("  WARNING: learn_k with use_drag_baseline=True. The anchor then\n"
               "           reduces to ||residual||^2, which k cancels out of, so\n"
@@ -837,7 +847,7 @@ def train_force_gnn(Wall,
                 x_mean_g, x_std_g, e_mean_g, e_std_g, scale_vec_g,
                 ang_scale_vec_g, acc_mean_g, acc_std_g, g_step_g, dt,
                 use_wind=use_wind, use_drag_baseline=use_drag_baseline,
-                k_over_m=k_eff, contact_d0=contact_d0, contact_tau=contact_tau,
+                k_over_m=k_now(), contact_d0=contact_d0, contact_tau=contact_tau,
                 loss_mode=loss_mode,
                 phys=phys, phys_weights=phys_weights)
 
@@ -899,8 +909,8 @@ def train_force_gnn(Wall,
                 x_mean_g, x_std_g, e_mean_g, e_std_g, scale_vec_g,
                 ang_scale_vec_g, g_step_g, dt,
                 device, use_wind=use_wind, use_drag_baseline=use_drag_baseline,
-                k_over_m=(float(phys.k_over_m.detach())
-                          if (learn_k and fix_k is None) else k_over_m),
+                k_over_m=(float(phys.k_over_m.detach()) if _k_learnable
+                          else k_over_m),
                 contact_d0=contact_d0, contact_tau=contact_tau,
                 mass=mass)
             print(f"  Rollout val | center: {rollout_center:.4f} | angle: {rollout_angle:.2f}")
