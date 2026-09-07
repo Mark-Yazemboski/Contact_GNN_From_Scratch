@@ -169,7 +169,7 @@ loss_mode = "accel"
 # mean misalignment. Use the SPLIT pair instead; keep w_diss for the ablation.
 w_diss = 0.0           # gamma_1  : JOINT Coulomb (legacy / ablation arm)
 w_fric_dir = .3       # gamma_1a : direction half - fixes crossing arrows
-w_fric_mag = 1       # gamma_1b : magnitude half - mu's ONLY gradient path
+w_fric_mag = .1       # gamma_1b : magnitude half - mu's ONLY gradient path
 w_fric_cone= 1.5       # gamma_1c : ||phi_t|| <= mu phi_n, STATIC regime too
 w_sparse = 0.0         # contact sparsity - leave off (shrinks legitimate
                        # resting normal forces too)
