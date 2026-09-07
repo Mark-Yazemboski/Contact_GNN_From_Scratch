@@ -27,7 +27,6 @@ from visualize_force_model import visualize_force_rollout
 from run_report import save_run_report
 from generate_node_states import BLOCK_HALF_WIDTH
 from physics_losses import summarize_diagnostics, reset_diagnostics
-from run_diagnostics import collect_run_diagnostics, plot_run_diagnostics
 
 
 torch.set_float32_matmul_precision('high')
@@ -283,14 +282,12 @@ if Evaluate_model:
         # force_contact_err_contact instead of only in the log.
         # Averaged, not final-value: one batch per epoch is noisy.
         diagnostics = summarize_diagnostics(last_n=20)
-        # Recovered mu / k, converged prediction loss, and how far each learned
-        # parameter travelled - read straight out of _physics.pt and
-        # _loss_history.pt so they land in the CSV instead of only the log.
-        diagnostics.update(collect_run_diagnostics(save_model_path, last_n=20))
         print("\nEnd-of-run diagnostics (mean of last "
               f"{diagnostics.get('diag_n_epochs', 0)} epochs):")
         for k, v in sorted(diagnostics.items()):
-            print(f"    {k:<22} {v:.6g}")
+            # mu_mode / k_mode are strings; ':.6g' only formats numbers.
+            print(f"    {k:<22} {v:.6g}" if isinstance(v, (int, float))
+                  else f"    {k:<22} {v}")
 
         settings = dict(
             architecture="force",           # distinguishes these rows at a glance
@@ -330,11 +327,6 @@ if Evaluate_model:
         )
         save_run_report(model_folder_path, settings, metrics, slopes=[],
                         run_name=extra_name, master_csv=FORCE_MASTER_CSV)
-
-    # Loss curves plus the mu and k traces. The TRACE is the evidence for
-    # identification, not the endpoint: a monotone descent that has not
-    # arrived is a different result from a value that parked at its init.
-    plot_run_diagnostics(save_model_path, mu_true=0.198, k_calibrated=K_OVER_M)
 
 # ----------------------------------------------------------------------
 if Visualize_model:
