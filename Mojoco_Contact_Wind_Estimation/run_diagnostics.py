@@ -34,16 +34,20 @@ USAGE
   run_name is taken from the parent directory, which run_force_multi_step.py
   builds from extra_name, so the match against the CSV is exact:
 
+  PASS RUN DIRECTORIES. The bare <stem>.pt is never written by the trainer, so
+  a glob on it matches nothing and the shell hands the pattern through
+  unexpanded. Directories always exist, so they always glob.
+
       # print + figure only
-      python run_diagnostics.py models/MAG_1e1_1/256_force_gns_model.pt
+      python run_diagnostics.py models/MAG_1e1_1/
 
       # ALSO write the values into the master CSV
-      python run_diagnostics.py --csv models/all_force_runs_master.csv \\
-             models/*/256_force_gns_model.pt
+      python run_diagnostics.py --csv models/all_force_runs_master.csv models/*/
 
       # CSV only, skip the figures
-      python run_diagnostics.py --csv models/all_force_runs_master.csv --no-plot \\
-             models/K_LearnOff_*/256_force_gns_model.pt
+      python run_diagnostics.py --csv models/all_force_runs_master.csv --no-plot models/K_LearnOff_*/
+
+  Individual checkpoint files (_physics.pt, _final.pt, ...) are also accepted.
 """
 
 import os
@@ -87,8 +91,36 @@ def _load(path):
         return None
 
 
+_CKPT_SUFFIXES = ("_physics.pt", "_loss_history.pt", "_best_model.pt",
+                  "_final.pt", "_norms.pt", ".pt")
+
+
+def _resolve_stem(path):
+    """Accept anything that points at a run and return the checkpoint stem.
+
+    A RUN DIRECTORY is the friendliest input and the one to prefer:
+    train_force_gns.py never writes the bare <stem>.pt - only _final.pt,
+    _best_model.pt, _norms.pt, _physics.pt and _loss_history.pt - so a shell
+    glob on '<name>/256_force_gns_model.pt' matches nothing and bash passes the
+    unexpanded pattern straight through. Globbing on directories always works.
+
+    Also accepts any individual checkpoint file, or the stem itself.
+    """
+    p = os.path.abspath(str(path).rstrip("/\\"))
+    if os.path.isdir(p):
+        for suffix in ("_physics.pt", "_loss_history.pt"):
+            hits = sorted(f for f in os.listdir(p) if f.endswith(suffix))
+            if hits:
+                return os.path.join(p, hits[0][: -len(suffix)])
+        return os.path.join(p, "")          # directory exists but is empty
+    for suffix in _CKPT_SUFFIXES:
+        if p.endswith(suffix):
+            return p[: -len(suffix)]
+    return p
+
+
 def _paths(save_model_path):
-    stem = os.path.splitext(save_model_path)[0]
+    stem = _resolve_stem(save_model_path)
     return stem + "_physics.pt", stem + "_loss_history.pt", stem
 
 
@@ -237,14 +269,15 @@ def plot_run_diagnostics(save_model_path, out_path=None,
 # CSV backfill
 # ======================================================================
 
-def run_name_from_path(save_model_path):
-    """models/<extra_name>/256_force_gns_model.pt -> <extra_name>.
+def run_name_from_path(path):
+    """models/<extra_name>/ or models/<extra_name>/<any checkpoint> -> <extra_name>.
 
     run_force_multi_step.py builds model_folder_path from extra_name and
-    passes extra_name straight to save_run_report as run_name, so the parent
+    passes extra_name straight to save_run_report as run_name, so the run
     directory IS the CSV's run_name. Exact match, no guessing.
     """
-    return os.path.basename(os.path.dirname(os.path.abspath(save_model_path)))
+    p = os.path.abspath(str(path).rstrip("/\\"))
+    return os.path.basename(p if os.path.isdir(p) else os.path.dirname(p))
 
 
 def backfill_csv(csv_path, model_paths, last_n=20):
@@ -266,7 +299,17 @@ def backfill_csv(csv_path, model_paths, last_n=20):
         name = run_name_from_path(p)
         vals = collect_run_diagnostics(p, last_n=last_n)
         if not vals:
-            skipped.append((name, "no checkpoints found"))
+            # Distinguish "run has no checkpoints" from "this path does not
+            # exist at all", which is almost always an unexpanded glob - e.g.
+            # a stray backslash-space, which bash reads as an escaped space
+            # rather than a line continuation.
+            probe = os.path.abspath(str(p).rstrip("/\\"))
+            folder = probe if os.path.isdir(probe) else os.path.dirname(probe)
+            why = ("path does not exist - unexpanded glob? "
+                   "(pass the run DIRECTORY, e.g. models/K_LearnOff_*/)"
+                   if not os.path.isdir(folder)
+                   else "no _physics.pt / _loss_history.pt in that folder")
+            skipped.append((name, why))
             continue
         if name not in known:
             skipped.append((name, "run_name not in CSV"))
