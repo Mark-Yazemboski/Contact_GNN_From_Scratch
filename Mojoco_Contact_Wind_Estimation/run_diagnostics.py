@@ -27,10 +27,23 @@ WHY THIS EXISTS
 
 USAGE
 
-  From run_force_multi_step.py (see the patch at the bottom of this docstring),
-  or standalone to backfill a finished run:
+  Live, from run_force_multi_step.py - the values are added to the run report
+  automatically, no action needed.
 
+  Standalone, to backfill runs that finished before this file existed. The
+  run_name is taken from the parent directory, which run_force_multi_step.py
+  builds from extra_name, so the match against the CSV is exact:
+
+      # print + figure only
       python run_diagnostics.py models/MAG_1e1_1/256_force_gns_model.pt
+
+      # ALSO write the values into the master CSV
+      python run_diagnostics.py --csv models/all_force_runs_master.csv \\
+             models/*/256_force_gns_model.pt
+
+      # CSV only, skip the figures
+      python run_diagnostics.py --csv models/all_force_runs_master.csv --no-plot \\
+             models/K_LearnOff_*/256_force_gns_model.pt
 """
 
 import os
@@ -221,12 +234,99 @@ def plot_run_diagnostics(save_model_path, out_path=None,
 
 
 # ======================================================================
+# CSV backfill
+# ======================================================================
+
+def run_name_from_path(save_model_path):
+    """models/<extra_name>/256_force_gns_model.pt -> <extra_name>.
+
+    run_force_multi_step.py builds model_folder_path from extra_name and
+    passes extra_name straight to save_run_report as run_name, so the parent
+    directory IS the CSV's run_name. Exact match, no guessing.
+    """
+    return os.path.basename(os.path.dirname(os.path.abspath(save_model_path)))
+
+
+def backfill_csv(csv_path, model_paths, last_n=20):
+    """Write collect_run_diagnostics() output into the matching CSV rows as
+    settings.<key> columns. Backs up once, matches exactly on run_name, and
+    reports anything it could not place instead of guessing."""
+    import warnings
+    import pandas as pd
+    warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+
+    df = pd.read_csv(csv_path).copy()   # de-fragment; we add columns one by one
+    if "run_name" not in df.columns:
+        print(f"  [run_diagnostics] {csv_path} has no run_name column")
+        return
+    known = set(df["run_name"].astype(str))
+
+    matched, skipped = 0, []
+    for p in model_paths:
+        name = run_name_from_path(p)
+        vals = collect_run_diagnostics(p, last_n=last_n)
+        if not vals:
+            skipped.append((name, "no checkpoints found"))
+            continue
+        if name not in known:
+            skipped.append((name, "run_name not in CSV"))
+            continue
+        rows = df["run_name"].astype(str) == name
+        for col, v in vals.items():
+            key = f"settings.{col}"
+            # mu_mode / k_mode are strings; a float64 column refuses them, and
+            # a pre-existing all-NaN column is float64 by default.
+            if key not in df.columns:
+                df[key] = pd.Series([np.nan] * len(df),
+                                    dtype=object if isinstance(v, str) else float)
+            elif isinstance(v, str) and df[key].dtype != object:
+                df[key] = df[key].astype(object)
+            df.loc[rows, key] = v
+        matched += 1
+        bits = [f"{k}={vals[k]:.5g}" for k in
+                ("recovered_k_over_m", "mu_final", "final_train_loss")
+                if k in vals]
+        print(f"  {name:<22} " + "  ".join(bits))
+
+    if skipped:
+        print("\n  Skipped:")
+        for n, why in skipped:
+            print(f"    {n:<22} {why}")
+
+    if not matched:
+        print("\n  Nothing matched - CSV left untouched.")
+        return
+    backup = csv_path + ".bak"
+    if not os.path.exists(backup):
+        pd.read_csv(csv_path).to_csv(backup, index=False)
+        print(f"\n  Backed up original to {backup}")
+    df.to_csv(csv_path, index=False)
+    print(f"  Updated {matched} row(s) in {csv_path}")
+
+
+# ======================================================================
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    if not args:
         sys.exit(__doc__)
-    for p in sys.argv[1:]:
-        print(f"\n=== {p} ===")
-        d = collect_run_diagnostics(p)
-        for k, v in sorted(d.items()):
+
+    csv_path, do_plot, paths = None, True, []
+    i = 0
+    while i < len(args):
+        if args[i] == "--csv":
+            csv_path = args[i + 1]; i += 2
+        elif args[i] == "--no-plot":
+            do_plot = False; i += 1
+        else:
+            paths.append(args[i]); i += 1
+
+    for p in paths:
+        print(f"\n=== {run_name_from_path(p)} ===")
+        for k, v in sorted(collect_run_diagnostics(p).items()):
             print(f"  {k:<28} {v}")
-        plot_run_diagnostics(p)
+        if do_plot:
+            plot_run_diagnostics(p)
+
+    if csv_path:
+        print(f"\n=== writing to {csv_path} ===")
+        backfill_csv(csv_path, paths)
