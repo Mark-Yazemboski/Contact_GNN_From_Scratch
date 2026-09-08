@@ -286,7 +286,7 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
                        use_wind=False, use_drag_baseline=False, k_over_m=0.0285,
                        contact_d0=0.02, contact_tau=0.005,
                        loss_mode="accel",
-                       phys=None, phys_weights=None):
+                       phys=None, phys_weights=None, k_learnable=False):
     """
     Unroll `multistep` steps: features -> contact forces + COM fluid wrench ->
     rigid step -> loss vs truth.
@@ -382,12 +382,28 @@ def _unroll_force_loss(model, batch, multistep, Wall, h, rest_nodes,
             # See physics_losses.py for the full documentation of each term
             # and the mapping to the proposal's Eq. (5).
             
-            drag_target = drag_accel_step(
-                wind, (com_curr - com_prev).detach(), dt, k_over_m).detach()
-            # For the physics terms, build the fluid total with the DETACHED
-            # baseline: the terms then constrain only the fluid head, never
-            # the motion. With the baseline on, the anchor reduces exactly to
-            # "keep the learned residual small".
+            # The VELOCITY is detached: the anchor is a target for the fluid
+            # head, never a pathway back into the motion.
+            #
+            # k is detached ONLY when it is a constant. When k is learnable,
+            # detaching the whole expression removes k's LAST gradient path in
+            # the use_drag_baseline=False configuration, where drag_accel_step
+            # is not called anywhere else - log_k then sits at its init for the
+            # entire run. Measured: k_drift exactly 0.00000 across six runs.
+            #
+            #   baseline OFF: anchor = ||a_fluid - k*w||^2, an explicit
+            #                 least-squares fit of k to the learned fluid
+            #                 force. This is where k is identified.
+            #   baseline ON : anchor = ||residual||^2 and k cancels out of it,
+            #                 so k is identified only through the prediction
+            #                 loss via extra_accel.
+            _drag = drag_accel_step(
+                wind, (com_curr - com_prev).detach(), dt, k_over_m)
+            drag_target = _drag if k_learnable else _drag.detach()
+            # For the physics terms, build the fluid total with the baseline
+            # term above: the terms then constrain only the fluid head (and,
+            # when learnable, k), never the motion. With the baseline on, the
+            # anchor reduces exactly to "keep the learned residual small".
             fluid_total_phys = (a_fluid + drag_target if use_drag_baseline
                                 else a_fluid)
             fluid_series.append(fluid_total_phys)
@@ -847,7 +863,8 @@ def train_force_gnn(Wall,
                 x_mean_g, x_std_g, e_mean_g, e_std_g, scale_vec_g,
                 ang_scale_vec_g, acc_mean_g, acc_std_g, g_step_g, dt,
                 use_wind=use_wind, use_drag_baseline=use_drag_baseline,
-                k_over_m=k_now(), contact_d0=contact_d0, contact_tau=contact_tau,
+                k_over_m=k_now(), k_learnable=_k_learnable,
+                contact_d0=contact_d0, contact_tau=contact_tau,
                 loss_mode=loss_mode,
                 phys=phys, phys_weights=phys_weights)
 
@@ -861,6 +878,8 @@ def train_force_gnn(Wall,
             for key, v in raw_terms.items():
                 phys_accum[key] = phys_accum.get(key, 0.0) + v
             num_batches += 1
+
+            
             if max_steps is not None and global_step >= max_steps:
                 budget_spent = True
                 print(f"  step budget reached: {global_step}/{max_steps} "
