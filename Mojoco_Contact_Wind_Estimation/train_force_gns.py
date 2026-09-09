@@ -878,8 +878,6 @@ def train_force_gnn(Wall,
             for key, v in raw_terms.items():
                 phys_accum[key] = phys_accum.get(key, 0.0) + v
             num_batches += 1
-
-            
             if max_steps is not None and global_step >= max_steps:
                 budget_spent = True
                 print(f"  step budget reached: {global_step}/{max_steps} "
@@ -958,11 +956,29 @@ def train_force_gnn(Wall,
                         "best_val_loss": best_val_loss,
                         "best_val_epoch": best_val_epoch,
                         "mu_trace": mu_trace,
+                        # k_trace belongs in the PERIODIC save too, not only
+                        # the final one: a run that is killed, crashes, or is
+                        # read mid-flight otherwise loses the k history
+                        # entirely and reports k_final = NaN.
+                        "k_trace": k_trace,
                         "global_step": global_step}, loss_history_path)
         else:
             print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.9f}")
         print(f"Epoch {epoch+1}: build={t1-t0:.1f}s, train={t2-t1:.1f}s (K={_K_now})",
               flush=True)
+
+        if phys is not None and (epoch + 1) % epoch_checkpoint_interval == 0:
+            # Same reasoning: keep _physics.pt current so recovered_mu /
+            # recovered_k_over_m survive an interrupted run.
+            torch.save({"state_dict": phys.state_dict(),
+                        "recovered_mu": float(phys.mu.detach()),
+                        "recovered_k_over_m": float(phys.k_over_m.detach()),
+                        "mu_mode": ("fixed" if fix_mu is not None
+                                    else "learnable" if learn_mu else "frozen"),
+                        "k_mode": ("fixed" if fix_k is not None
+                                   else "learnable" if learn_k else "frozen"),
+                        "epoch": epoch + 1},
+                       os.path.splitext(save_model_path)[0] + "_physics.pt")
 
         if (epoch + 1) % epoch_checkpoint_interval == 0:
             checkpoint_path = os.path.splitext(save_model_path)[0] + f"_epoch{epoch+1}.pt"

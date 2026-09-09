@@ -149,6 +149,9 @@ def collect_run_diagnostics(save_model_path, last_n=20):
     out = {}
 
     ph = _load(phys_path)
+    if ph is None:
+        print(f"  [run_diagnostics] MISSING {os.path.basename(phys_path)}"
+              " -> no recovered_mu / recovered_k_over_m")
     if ph:
         for src, dst in (("recovered_mu", "recovered_mu_ckpt"),
                          ("recovered_k_over_m", "recovered_k_over_m"),
@@ -158,6 +161,9 @@ def collect_run_diagnostics(save_model_path, last_n=20):
                 out[dst] = float(v) if isinstance(v, (int, float)) else str(v)
 
     hi = _load(hist_path)
+    if hi is None:
+        print(f"  [run_diagnostics] MISSING {os.path.basename(hist_path)}"
+              " -> no loss curves, no mu_trace, no k_trace")
     if hi:
         tv = hi.get("train_loss_values") or []
         if tv:
@@ -182,6 +188,13 @@ def collect_run_diagnostics(save_model_path, last_n=20):
         for name, key in (("mu", "mu_trace"), ("k", "k_trace")):
             tr = _trace_arrays(hi.get(key))
             if tr is None:
+                # Say WHY rather than leaving a silent NaN in the CSV: an
+                # absent key and an empty list mean different things.
+                print(f"  [run_diagnostics] no usable '{key}' "
+                      + ("(key absent - trainer did not save it)"
+                         if key not in hi else "(present but empty - "
+                         "was the parameter learnable?)")
+                      + f" -> {name}_final will be NaN")
                 continue
             ep, val = tr
             out[f"{name}_final"] = float(val[-1])
