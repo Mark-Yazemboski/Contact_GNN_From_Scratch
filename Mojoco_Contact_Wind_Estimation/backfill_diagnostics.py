@@ -35,6 +35,7 @@ NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
 RE_ALIGN = re.compile(rf"friction alignment\s*=\s*({NUM})")
 RE_MU_IMP = re.compile(rf"mu implied by predicted forces\s*=\s*({NUM})")
 RE_GATE = re.compile(rf"Slip gate\s*\|\s*OPEN\s+({NUM})\s*%")
+RE_CANCEL = re.compile(rf"cancellation\s+sliding\s+({NUM})\s+static\s+({NUM})")
 RE_RAWLINE = re.compile(r"Physics terms \(raw\)\s*\|(.*)")
 RE_RAWPAIR = re.compile(rf"([A-Za-z_][A-Za-z_0-9]*)\s*:\s*({NUM})")
 RE_MODELDIR = re.compile(r"models[/\\]([A-Za-z0-9_.\-]+)[/\\]")
@@ -71,6 +72,13 @@ def parse_log(path):
         out["diag_mu_implied_std"] = sd
     if gf:
         out["diag_gate_frac"] = tail_mean(gf)[0]
+
+    # cancellation fraction, per branch - added when the static-phase radial
+    # artifact turned out to be invisible to every other metric
+    cz = RE_CANCEL.findall(text)
+    if cz:
+        out["diag_cancel_slide"] = tail_mean([float(a) for a, _ in cz])[0]
+        out["diag_cancel_static"] = tail_mean([float(b) for _, b in cz])[0]
 
     raws = {}
     for line in RE_RAWLINE.findall(text):
