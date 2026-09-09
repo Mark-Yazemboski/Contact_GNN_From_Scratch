@@ -154,6 +154,11 @@ def summarize_diagnostics(last_n=20):
             out["diag_mu_implied_std"] = float(mi.std(ddof=1)) if mi.size > 1 else 0.0
         if gf.size:
             out["diag_gate_frac"] = float(gf.mean())
+        for key in ("cancel_slide", "cancel_static"):
+            v = np.array([r.get(key, np.nan) for r in tail], dtype=float)
+            v = v[np.isfinite(v)]
+            if v.size:
+                out[f"diag_{key}"] = float(v.mean())
         out["diag_n_epochs"] = len(tail)
     if RAW_HISTORY:
         tail = list(RAW_HISTORY)[-last_n:]
@@ -345,6 +350,23 @@ class PhysicsLosses(nn.Module):
             # slip. Magnitude-weighted, so a negligible misaimed force does not
             # drag the average down. This is the crossing-arrow defect as a
             # scalar: mu_param = mu_implied * mean_align.
+            # CANCELLATION FRACTION, per branch. 1 - ||sum phi_t|| / sum||phi_t||
+            # over the nodes of each cube: 0 = all friction pulling together,
+            # 1 = perfect cancellation (large opposing forces summing to
+            # nothing). The prediction loss sees only the net, so a cancelling
+            # field is free; and in the STATIC branch every other term is gated
+            # off, so nothing else measures this at all.
+            def _cancel(weight):
+                num = (weight * phi_t).sum(dim=1).norm(dim=-1)      # ||sum||
+                den = (weight * mag).sum(dim=1).squeeze(-1)         # sum|| ||
+                ok = den > self.eps
+                if not bool(ok.any()):
+                    return float('nan')
+                return float((1.0 - num[ok] / den[ok]).mean())
+
+            cancel_slide = _cancel(w_c * gate)
+            cancel_static = _cancel(w_c * (1.0 - gate))
+
             align = -(phi_t * v_hat_d).sum(-1, keepdim=True) / (mag + self.eps)
             wgm = wg * mag
             mean_align = (float((wgm * align).sum() / wgm.sum())
@@ -356,6 +378,7 @@ class PhysicsLosses(nn.Module):
                         pct=pct, counterfactual=cf,
                         mu_implied=mu_implied, mu_param=float(self.mu),
                         mean_align=mean_align,
+                        cancel_slide=cancel_slide, cancel_static=cancel_static,
                         misalign_deg=float(np.degrees(np.arccos(
                             min(1.0, max(-1.0, mean_align)))))
                         if mean_align == mean_align else float('nan'),
@@ -383,7 +406,10 @@ class PhysicsLosses(nn.Module):
             f"| mu implied by predicted forces = {r['mu_implied']:.3f} "
             f"(mu param = {r['mu_param']:.3f})\n"
             f"            | friction alignment = {r['mean_align']:+.3f} "
-            f"({r['misalign_deg']:.0f} deg off anti-parallel; 1.000 = perfect Coulomb)"
+            f"({r['misalign_deg']:.0f} deg off anti-parallel; 1.000 = perfect Coulomb)\n"
+            f"            | cancellation  sliding {r['cancel_slide']:.3f}  "
+            f"static {r['cancel_static']:.3f}   (0 = forces pull together, "
+            f"1 = they cancel to nothing)"
         )
 
 
@@ -461,7 +487,7 @@ class PhysicsLosses(nn.Module):
         w = (c_w * slip_gate).detach()
         return (w * resid.pow(2)).sum() / (c_w.detach().sum() + self.eps)
 
-    def h_friction_cone(self, phi_contact, c_w, wall_n):
+    def h_friction_cone(self, phi_contact, c_w, wall_n, v_node=None):
         """The COULOMB CONE bound  ||phi_t|| <= mu * phi_n.
 
         The other half of Coulomb friction, and the half that has been missing.
@@ -487,8 +513,36 @@ class PhysicsLosses(nn.Module):
         # is to shrink the offending friction force, not to widen the cone.
         excess = phi_t.norm(dim=-1, keepdim=True) - mu * phi_n.detach().clamp_min(0.0)
 
+        # STATIC BRANCH ONLY, when v_node is supplied.
+        #
+        # Complementary slackness has two disjoint branches. On a SLIDING node
+        # the constraint is ACTIVE and h_friction_magnitude enforces the
+        # equality ||phi_t|| = mu phi_n, which already implies the inequality -
+        # the cone is redundant there. On a STATIC node the constraint is
+        # INACTIVE, the equality is switched off by the slip gate, and the cone
+        # is the only law left.
+        #
+        # Applying it to sliding nodes as well is not merely redundant, it is
+        # unstable: the bound sits at a mu that h_friction_magnitude is fitting
+        # from those same forces, so clipping lowers mu, which tightens the
+        # bound, which clips harder. Measured: mu_implied 0.194 -> 0.186 ->
+        # 0.172 as w_fric_cone went 0 -> 0.5 -> 1.5.
+        #
+        # This is the SAME Coulomb cone, restricted to the branch where it is
+        # the operative condition. No margin, no weakened inequality.
         w = c_w.detach()
-        return (w * (excess.clamp_min(0.0) / self.phi_g).pow(2)).sum() / (w.sum() + self.eps)
+        if v_node is not None:
+            v = v_node.detach()
+            v_t = v - (v * wall_n).sum(-1, keepdim=True) * wall_n
+            speed = v_t.norm(dim=-1, keepdim=True)
+            slip_gate = torch.sigmoid((speed - self.slip_v0) / self.slip_tau)
+            w = w * (1.0 - slip_gate)
+        # Denominator is the TOTAL contact weight, not the gated weight -
+        # matching h_friction_magnitude. Normalizing by the gated weight would
+        # make this a weighted mean over static nodes only, in which case a
+        # uniform gate cancels top and bottom and the gating does nothing.
+        return ((w * (excess.clamp_min(0.0) / self.phi_g).pow(2)).sum()
+                / (c_w.detach().sum() + self.eps))
 
     # ------------------------------------------------------------------
     # h_pen  (proposal Eq. 5, second term) - architectural, no code needed.
@@ -610,7 +664,8 @@ class PhysicsLosses(nn.Module):
             raws["fric_mag"] = self.h_friction_magnitude(
                 phi_contact, c_w, v_node, wall_n)
         if weights.get("w_fric_cone", 0) > 0:
-            raws["fric_cone"] = self.h_friction_cone(phi_contact, c_w, wall_n)
+            raws["fric_cone"] = self.h_friction_cone(
+                phi_contact, c_w, wall_n, v_node)
         if weights.get("w_fluid_anchor", 0) > 0:
             raws["fluid_anchor"] = self.h_fluid_anchor(a_fluid_total, drag_target)
         if weights.get("w_sparse", 0) > 0:
