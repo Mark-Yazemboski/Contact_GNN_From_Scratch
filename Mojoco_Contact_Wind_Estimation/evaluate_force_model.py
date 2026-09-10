@@ -25,6 +25,8 @@ Set the CONFIG block, then:  python evaluate_force_model.py
 import os
 import csv
 import numpy as np
+
+from impulse_diagnostic import compute_impulse_split, aggregate
 import torch
 import matplotlib
 matplotlib.use("Agg")
@@ -143,6 +145,7 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
     # ======================================================================
     mg = mass * g
     rows = []
+    imp_rows = []          # impulse-vs-force split, one dict per trajectory
     pooled = {"Fc_pred": [], "Fc_true": [], "Ff_pred": [], "Ff_true": [],
               "Tc_pred": [], "Tc_true": [], "Tf_pred": [], "Tf_true": [],
               "phase": []}
@@ -168,6 +171,24 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
             Ff_t = (wr["J_fluid"].numpy() / DT_lbl)[2 * h: 2 * h + n_pred]
             Tc_t = (wr["tau_contact"].numpy() / DT_lbl)[2 * h: 2 * h + n_pred]
             Tf_t = (wr["tau_fluid"].numpy() / DT_lbl)[2 * h: 2 * h + n_pred]
+
+            # ---- IMPULSE vs FORCE split -------------------------------
+            # force_contact_err compares frame by frame. An impact lasts one
+            # or two frames, so an impulse delivered one frame late scores
+            # 2||J|| of per-frame error while the TOTAL impulse - and
+            # therefore the velocity change and the trajectory - is exactly
+            # right. Summing over each contact episode makes the comparison
+            # blind to WHEN the impulse landed; the gap between the two says
+            # how much of the 46% is timing rather than force.
+            #
+            # Episodes are contiguous runs where the TRUE contact force is
+            # non-negligible, so a trajectory that bounces twice contributes
+            # two episodes rather than one pooled block in which an early
+            # error could cancel a late one.
+            Jc_p = Fc_p * DT_lbl
+            Jc_t = Fc_t * DT_lbl
+            active = np.linalg.norm(Fc_t, axis=1) > 0.05 * mg
+            imp_rows.append(compute_impulse_split(Jc_p, Jc_t, active))
 
             tc = int(per_traj[b]["t_contact"])            # from-h indexing
             ts = int(per_traj[b]["t_settle"])
@@ -203,6 +224,21 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
         rows.append(row)
 
     wrench_metrics = {}
+    if imp_rows:
+        wrench_metrics.update(aggregate(imp_rows))
+        tf = wrench_metrics.get("impulse_timing_fraction")
+        if tf is not None:
+            print("\n" + "=" * 70)
+            print("CONTACT ERROR: TIMING vs MAGNITUDE")
+            print("=" * 70)
+            print(f"  per-frame error / true impulse   "
+                  f"{wrench_metrics['impulse_E_frame_over_signal']:.3f}")
+            print(f"  total-impulse error / true       "
+                  f"{wrench_metrics['impulse_E_total_over_signal']:.3f}")
+            print(f"  timing fraction                  {tf:.3f}"
+                  "   (1 = pure smearing, 0 = genuine force error)")
+            print("=" * 70)
+
     have_labels = len(pooled["Fc_pred"]) > 0
     if have_labels:
         Fc_p = np.concatenate(pooled["Fc_pred"]); Fc_t = np.concatenate(pooled["Fc_true"])
