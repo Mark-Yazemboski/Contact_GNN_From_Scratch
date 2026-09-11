@@ -371,6 +371,29 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
     if recovered_mu is not None:
         out["recovered_mu"] = recovered_mu
     out.update(wrench_metrics)
+
+    # ---- checkpoint-derived values, folded into the RETURNED metrics ------
+    # recovered_k_over_m, the mu/k traces and the converged prediction loss
+    # live in _physics.pt and _loss_history.pt, which only the trainer writes.
+    # Reading them HERE rather than in the run file means they reach the CSV
+    # for every experiment: evaluate_force_model is the one function every run
+    # passes through, whereas the run file is copied per experiment
+    # (Test_37.py, Test_43.py, ...) and only one copy ever carries the call.
+    # They land as metrics.* instead of settings.*; the values are identical.
+    try:
+        import glob as _glob
+        from run_diagnostics import collect_run_diagnostics
+        _hits = sorted(_glob.glob(os.path.join(model_folder, "*_physics.pt")))
+        if _hits:
+            _stem = _hits[0][: -len("_physics.pt")] + ".pt"
+            _extra = collect_run_diagnostics(_stem)
+            if _extra:
+                print(f"  checkpoint diagnostics: {len(_extra)} value(s) "
+                      "added to the run report")
+                out.update(_extra)
+    except Exception as _e:                # never fail an eval over reporting
+        print(f"  [evaluate] checkpoint diagnostics unavailable: {_e}")
+
     return out
 
 
