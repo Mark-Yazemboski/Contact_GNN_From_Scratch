@@ -387,9 +387,16 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
         if _hits:
             _stem = _hits[0][: -len("_physics.pt")] + ".pt"
             _extra = collect_run_diagnostics(_stem)
+            # NUMERIC ONLY. run_report.py does float(v) on every metric, so a
+            # string here (mu_mode / k_mode are "learnable" / "frozen" /
+            # "fixed") raises ValueError and kills the CSV write AFTER a
+            # completed 10k-epoch run. Those two are recoverable from
+            # settings.learn_mu / settings.learn_k anyway.
+            _extra = {k: float(v) for k, v in _extra.items()
+                      if isinstance(v, (int, float)) and not isinstance(v, bool)}
             if _extra:
-                print(f"  checkpoint diagnostics: {len(_extra)} value(s) "
-                      "added to the run report")
+                print(f"  checkpoint diagnostics: {len(_extra)} numeric "
+                      "value(s) added to the run report")
                 out.update(_extra)
     except Exception as _e:                # never fail an eval over reporting
         print(f"  [evaluate] checkpoint diagnostics unavailable: {_e}")
