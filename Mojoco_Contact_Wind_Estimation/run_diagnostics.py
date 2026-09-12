@@ -329,7 +329,9 @@ def backfill_csv(csv_path, model_paths, last_n=20):
             continue
         rows = df["run_name"].astype(str) == name
         for col, v in vals.items():
-            key = f"settings.{col}"
+            # metrics.*, matching what evaluate_force_model writes live, so a
+            # backfilled run and a fresh run land in the SAME column
+            key = f"metrics.{col}"
             # mu_mode / k_mode are strings; a float64 column refuses them, and
             # a pre-existing all-NaN column is float64 by default.
             if key not in df.columns:

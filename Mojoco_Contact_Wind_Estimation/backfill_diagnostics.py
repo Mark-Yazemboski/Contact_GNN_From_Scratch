@@ -119,7 +119,9 @@ def main(csv_path, log_paths):
             continue
         rows = df["run_name"].astype(str) == hint
         for col, v in vals.items():
-            key = f"settings.{col}"
+            # metrics.*, matching what evaluate_force_model writes live, so a
+            # backfilled run and a fresh run land in the SAME column
+            key = f"metrics.{col}"
             if key not in df.columns:
                 df[key] = np.nan
             df.loc[rows, key] = v

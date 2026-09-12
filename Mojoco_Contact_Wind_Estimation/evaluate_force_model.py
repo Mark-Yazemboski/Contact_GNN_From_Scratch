@@ -383,6 +383,22 @@ def evaluate_force_model(model_folder, data_folder, test_indices,
     try:
         import glob as _glob
         from run_diagnostics import collect_run_diagnostics
+        # Per-epoch diagnostics too. physics_losses.DIAG_HISTORY is module
+        # state in THIS process, so the evaluator can read what training just
+        # accumulated - no need for the run file to forward it. Doing both
+        # here means every diagnostic lands under metrics.* for every run,
+        # regardless of which copy of the run script launched it.
+        try:
+            from physics_losses import summarize_diagnostics
+            _diag = summarize_diagnostics(last_n=20)
+            if _diag:
+                out.update({k: float(v) for k, v in _diag.items()
+                            if isinstance(v, (int, float))
+                            and not isinstance(v, bool)})
+                print(f"  per-epoch diagnostics: {len(_diag)} value(s) added")
+        except Exception as _e:
+            print(f"  [evaluate] per-epoch diagnostics unavailable: {_e}")
+
         _hits = sorted(_glob.glob(os.path.join(model_folder, "*_physics.pt")))
         if _hits:
             _stem = _hits[0][: -len("_physics.pt")] + ".pt"
