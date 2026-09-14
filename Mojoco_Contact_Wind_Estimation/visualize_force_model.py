@@ -45,12 +45,80 @@ from train_force_gns import build_force_dataset, rollout_force_batched
 from generate_node_states import mesh_cube_surface, knn_adjacency, BLOCK_HALF_WIDTH
 
 
+# ======================================================================
+# ADDED: pick the frames that are worth a panel
+# ======================================================================
+def auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle, n_panels=6):
+    """Choose frames by EVENT rather than by even spacing.
+
+    Evenly spaced panels spend most of the filmstrip on dead flight time. The
+    interesting frames are the ones where the forces do something: the moment
+    before touchdown, each impact peak, the hardest sliding frame, and rest.
+    Everything here is read off the predicted force traces, so the selection is
+    reproducible and you can state the rule in the caption.
+    """
+    Fn = np.linalg.norm(f_norm.numpy().sum(axis=1), axis=-1) / MG   # (n_steps,) in m g
+    Ft = np.linalg.norm(f_tang.numpy().sum(axis=1), axis=-1) / MG
+    n_steps = len(Fn)
+
+    def to_frame(k):
+        return int(np.clip(k + h, 0, L - 1))
+
+    picks = []
+
+    # mid-flight, so the strip opens with the cube clearly airborne
+    if t_contact > h + 2:
+        picks.append(("mid-flight", int(h + (t_contact - h) // 2)))
+    # last frame before the first contact
+    if t_contact - 1 > h:
+        picks.append(("pre-impact", int(t_contact - 1)))
+
+    # contact episodes: rising edges of the normal force
+    on = Fn > 0.15
+    edges = np.flatnonzero(np.diff(on.astype(int)) == 1) + 1
+    if on.size and on[0]:
+        edges = np.r_[0, edges]
+    for e_i, start in enumerate(edges[:2]):          # first two impacts
+        stop = edges[e_i + 1] if e_i + 1 < len(edges) else n_steps
+        seg = Fn[start:stop]
+        if seg.size:
+            picks.append((f"impact {e_i + 1} peak",
+                          to_frame(start + int(np.argmax(seg)))))
+
+    # hardest friction frame - the one that shows the tangential arrows
+    if Ft.size:
+        picks.append(("max friction", to_frame(int(np.argmax(Ft)))))
+
+    # at rest
+    picks.append(("settled", int(np.clip(t_settle + 5, 0, L - 1))))
+
+    seen, out = set(), []
+    for label, f in picks:
+        if f not in seen:
+            seen.add(f)
+            out.append((label, f))
+    out.sort(key=lambda t: t[1])
+    if len(out) > n_panels:                          # drop from the middle
+        keep = [0] + list(np.linspace(1, len(out) - 2, n_panels - 2).astype(int)) \
+               + [len(out) - 1]
+        out = [out[i] for i in sorted(set(keep))]
+    for label, f in out:
+        print(f"    frame {f:3d}  {label}")
+    return [f for _, f in out]
+
+
 def visualize_force_rollout(model_folder, data_folder, trajectory,
                             model_prefix=None, save_path=None, show=False,
                             weights_only=False, unscale=False, interval=50,
-                            mg_arrow_widths=1.0, min_arrow_frac=0.01,
+                            mg_arrow_widths=1.0, min_arrow_frac=0.002,
                             draw_floor=True, draw_ground_truth=True,
-                            checkpoint="best"):
+                            checkpoint="best",
+                            # --- ADDED: display gains, previously hardcoded ---
+                            normal_gain=1.0, tangent_gain=8.0, fluid_gain=1.0,
+                            # --- ADDED: vector frame export for the poster ---
+                            save_frames=None, n_panels=6, frame_dir=None,
+                            frame_format="pdf", frame_clean=True,
+                            elev=18, azim=-62, make_gif=True):
     """Roll out ONE trajectory and animate it with per-node contact-force
     arrows (normal + tangential) and a COM fluid-force arrow. Returns the path
     of the saved GIF. show=False is the default so this is safe to call from a
@@ -64,14 +132,11 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
         model_folder, f"force_rollout_{trajectory}.gif")
     C_NORMAL, C_TANGENT, C_FLUID = "tab:green", "tab:orange", "magenta"
 
-     # --- arrow appearance ---
-    MG_ARROW_WIDTHS = 1.0        # a force of m*g draws this many block-widths long
-    NORMAL_GAIN  = 1.0           # per-channel display gain on top of the physical scale
-    TANGENT_GAIN = 8.0           # friction is ~mu*mg/n_contact_nodes -- unreadable at 1.0
-    FLUID_GAIN   = 1.0
-    MIN_ARROW_FRAC = 0.002       # was 0.01, which culled per-node friction in slow frames
-    DRAW_FLOOR = True
-    DRAW_GROUND_TRUTH = True
+    # --- arrow appearance ---
+    # CHANGED: these used to be hardcoded here, which silently overwrote the
+    # function arguments of the same name - passing mg_arrow_widths=2.0 or
+    # min_arrow_frac=... did nothing at all. They are parameters now.
+    NORMAL_GAIN, TANGENT_GAIN, FLUID_GAIN = normal_gain, tangent_gain, fluid_gain
     # ======================================================================
     # Load model + config
     # ======================================================================
@@ -179,9 +244,9 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
 
     # legend proxies for the arrow colors
     ax.plot([], [], [], c=C_NORMAL, lw=2, label='contact normal')
-    ax.plot([], [], [], c=C_TANGENT, lw=2, label='contact tangential')
+    ax.plot([], [], [], c=C_TANGENT, lw=2,
+            label=f'contact tangential (x{TANGENT_GAIN:g})')
     ax.plot([], [], [], c=C_FLUID, lw=2, label='fluid @ COM')
-    ax.plot([], [], [], c=C_TANGENT, lw=2, label=f'contact tangential (x{TANGENT_GAIN:g})')
     ax.legend(loc='upper left', fontsize=8)
 
     hud = fig.text(0.015, 0.015, "", fontsize=9, family='monospace', va='bottom')
@@ -260,13 +325,61 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
         return tuple(artists)
 
 
-    ani = animation.FuncAnimation(fig, update, frames=L, interval=INTERVAL, blit=False)
+    # Fixed camera and aspect BEFORE anything is rendered, so exported frames
+    # and the GIF agree and the cube cannot appear to jump between panels.
+    ax.view_init(elev=elev, azim=azim)
     try:
         ax.set_aspect('equal')
     except Exception:
         pass                                     # older matplotlib 3d has no equal aspect
 
-    if SAVE_PATH is not None:
+    # ==================================================================
+    # ADDED: vector frame export for the filmstrip
+    # ==================================================================
+    frame_paths = []
+    if save_frames is not None:
+        if isinstance(save_frames, str) and save_frames == "auto":
+            idx = auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle,
+                              n_panels=n_panels)
+            print(f"  auto-selected frames: {idx}")
+        else:
+            idx = sorted({int(f) for f in save_frames if 0 <= int(f) < L})
+
+        fdir = frame_dir or os.path.join(
+            os.path.dirname(SAVE_PATH) or ".", f"frames_traj{TRAJECTORY}")
+        os.makedirs(fdir, exist_ok=True)
+
+        # Strip the on-screen furniture: a poster panel wants the cube and the
+        # arrows, not a HUD, a legend and a title repeated six times.
+        if frame_clean:
+            keep_title, keep_hud = ax.get_title(), hud.get_text()
+            leg = ax.get_legend()
+            ax.set_title("")
+            hud.set_text("")
+            if leg is not None:
+                leg.set_visible(False)
+            ax.set_axis_off()
+
+        for f in idx:
+            update(f)
+            if frame_clean:
+                hud.set_text("")
+            p_out = os.path.join(fdir, f"frame_{f:03d}.{frame_format}")
+            fig.savefig(p_out, transparent=True, bbox_inches="tight",
+                        pad_inches=0.02, dpi=300)
+            frame_paths.append(p_out)
+            print(f"  wrote {p_out}   [{_phase(f)}]")
+
+        if frame_clean:                          # restore for the GIF
+            ax.set_title(keep_title)
+            hud.set_text(keep_hud)
+            if leg is not None:
+                leg.set_visible(True)
+            ax.set_axis_on()
+
+    ani = animation.FuncAnimation(fig, update, frames=L, interval=INTERVAL, blit=False)
+
+    if SAVE_PATH is not None and make_gif:
         os.makedirs(os.path.dirname(SAVE_PATH) or ".", exist_ok=True)
         print(f"Saving animation to {SAVE_PATH} ...")
         ani.save(SAVE_PATH, writer='pillow', fps=max(1, 1000 // INTERVAL))
@@ -276,7 +389,9 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
         plt.show()
     else:
         plt.close(fig)
-    return SAVE_PATH
+    return {"gif": SAVE_PATH if make_gif else None,
+            "frames": frame_paths,
+            "t_contact": t_contact, "t_settle": t_settle, "n_frames": L}
 
 
 # ======================================================================
@@ -307,9 +422,18 @@ if __name__ == "__main__":
 
     C_NORMAL, C_TANGENT, C_FLUID = "tab:green", "tab:orange", "magenta"
 
-    visualize_force_rollout(MODEL_FOLDER, DATA_FOLDER, TRAJECTORY,
-                            model_prefix=MODEL_PREFIX, save_path=SAVE_PATH,
-                            show=SHOW, weights_only=WEIGHTS_ONLY, unscale=UNSCALE,
-                            interval=INTERVAL, mg_arrow_widths=MG_ARROW_WIDTHS,
-                            min_arrow_frac=MIN_ARROW_FRAC, draw_floor=DRAW_FLOOR,
-                            draw_ground_truth=DRAW_GROUND_TRUTH)
+    # save_frames="auto"  picks the event frames and writes each one as a
+    # separate vector PDF. Pass a list instead to choose them yourself, e.g.
+    # save_frames=[12, 34, 41, 78]. make_gif=False skips the animation.
+    out = visualize_force_rollout(MODEL_FOLDER, DATA_FOLDER, TRAJECTORY,
+                                  model_prefix=MODEL_PREFIX, save_path=SAVE_PATH,
+                                  show=SHOW, weights_only=WEIGHTS_ONLY,
+                                  unscale=UNSCALE, interval=INTERVAL,
+                                  mg_arrow_widths=MG_ARROW_WIDTHS,
+                                  min_arrow_frac=MIN_ARROW_FRAC,
+                                  draw_floor=DRAW_FLOOR,
+                                  draw_ground_truth=DRAW_GROUND_TRUTH,
+                                  tangent_gain=TANGENT_GAIN,
+                                  save_frames="auto", n_panels=6,
+                                  frame_format="pdf", make_gif=True)
+    print(out)

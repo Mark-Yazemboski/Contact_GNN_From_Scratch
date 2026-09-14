@@ -2,6 +2,7 @@
 !/models/.gitkeep
 
 /data/pytorch_datasets/*
+/figure_assets/*
 !/data/pytorch_datasets/.gitkeep
 
 __pycache__/

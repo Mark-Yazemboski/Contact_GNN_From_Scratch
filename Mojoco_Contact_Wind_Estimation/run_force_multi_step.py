@@ -55,8 +55,8 @@ Num_val = int(validation_percentage * Num_total_trajectories)
 Used_Num_train_trajectories = 256
 #---------------------------------------------------------------------------------------------------------
 
-
-train_range = range(0, Used_Num_train_trajectories)
+train_start = 0          # 0, then 4, then 8 for seeds 1/2/3
+train_range = range(train_start, train_start + Used_Num_train_trajectories)
 val_range = range(Num_train, Num_train + Num_val)
 test_range = range(Num_train + Num_val, Num_total_trajectories - 1)
 
