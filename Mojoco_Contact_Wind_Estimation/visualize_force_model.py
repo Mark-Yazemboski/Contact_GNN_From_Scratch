@@ -51,60 +51,79 @@ from generate_node_states import mesh_cube_surface, knn_adjacency, BLOCK_HALF_WI
 def auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle, n_panels=6):
     """Choose frames by EVENT rather than by even spacing.
 
-    Evenly spaced panels spend most of the filmstrip on dead flight time. The
-    interesting frames are the ones where the forces do something: the moment
-    before touchdown, each impact peak, the hardest sliding frame, and rest.
-    Everything here is read off the predicted force traces, so the selection is
-    reproducible and you can state the rule in the caption.
+    Forces only exist for frames h .. h + n_steps - 1. Frame L-1 usually has NO
+    force index (k = L-1-h lands one past the end), which is why a naive
+    "settled" pick came out with no arrows on it even though the GIF clearly
+    shows normal forces at rest. Everything below is clamped into the valid
+    range so every exported panel has forces.
     """
     Fn = np.linalg.norm(f_norm.numpy().sum(axis=1), axis=-1) / MG   # (n_steps,) in m g
     Ft = np.linalg.norm(f_tang.numpy().sum(axis=1), axis=-1) / MG
     n_steps = len(Fn)
 
-    def to_frame(k):
-        return int(np.clip(k + h, 0, L - 1))
+    first_forced = h                       # earliest frame that has forces
+    last_forced = h + n_steps - 1          # latest frame that has forces
 
+    def clamp(frame):
+        return int(np.clip(frame, first_forced, last_forced))
+
+    def to_frame(k):
+        return clamp(k + h)
+
+    # (priority, label, frame) - lower priority number is dropped last
     picks = []
 
-    # mid-flight, so the strip opens with the cube clearly airborne
     if t_contact > h + 2:
-        picks.append(("mid-flight", int(h + (t_contact - h) // 2)))
-    # last frame before the first contact
+        picks.append((3, "mid-flight", clamp(h + (t_contact - h) // 2)))
     if t_contact - 1 > h:
-        picks.append(("pre-impact", int(t_contact - 1)))
+        picks.append((2, "pre-impact", clamp(t_contact - 1)))
 
     # contact episodes: rising edges of the normal force
     on = Fn > 0.15
     edges = np.flatnonzero(np.diff(on.astype(int)) == 1) + 1
     if on.size and on[0]:
         edges = np.r_[0, edges]
+
     for e_i, start in enumerate(edges[:2]):          # first two impacts
         stop = edges[e_i + 1] if e_i + 1 < len(edges) else n_steps
         seg = Fn[start:stop]
         if seg.size:
-            picks.append((f"impact {e_i + 1} peak",
+            picks.append((1, f"impact {e_i + 1} peak",
                           to_frame(start + int(np.argmax(seg)))))
 
-    # hardest friction frame - the one that shows the tangential arrows
+    # SLIDING: midway between the second contact and settling. This is the
+    # phase where friction is doing the work and the cube is still moving.
+    if len(edges) >= 2:
+        second_contact = to_frame(int(edges[1]))
+        slide_end = clamp(t_settle)
+        if slide_end > second_contact + 1:
+            picks.append((1, "sliding",
+                          clamp((second_contact + slide_end) // 2)))
+    elif t_settle > t_contact + 2:                   # only one impact: use it
+        picks.append((1, "sliding", clamp((clamp(t_contact) + clamp(t_settle)) // 2)))
+
     if Ft.size:
-        picks.append(("max friction", to_frame(int(np.argmax(Ft)))))
+        picks.append((2, "max friction", to_frame(int(np.argmax(Ft)))))
 
-    # at rest
-    picks.append(("settled", int(np.clip(t_settle + 5, 0, L - 1))))
+    picks.append((1, "settled", clamp(t_settle + 5)))
 
-    seen, out = set(), []
-    for label, f in picks:
+    # de-duplicate by frame, keeping the highest-priority label
+    picks.sort(key=lambda t: (t[2], t[0]))
+    unique, seen = [], set()
+    for prio, label, f in picks:
         if f not in seen:
             seen.add(f)
-            out.append((label, f))
-    out.sort(key=lambda t: t[1])
-    if len(out) > n_panels:                          # drop from the middle
-        keep = [0] + list(np.linspace(1, len(out) - 2, n_panels - 2).astype(int)) \
-               + [len(out) - 1]
-        out = [out[i] for i in sorted(set(keep))]
-    for label, f in out:
+            unique.append((prio, label, f))
+
+    # if we have too many, drop the lowest-priority ones first
+    if len(unique) > n_panels:
+        unique.sort(key=lambda t: (t[0], t[2]))
+        unique = unique[:n_panels]
+
+    unique.sort(key=lambda t: t[2])
+    for prio, label, f in unique:
         print(f"    frame {f:3d}  {label}")
-    return [f for _, f in out]
+    return [f for _, _, f in unique]
 
 
 def visualize_force_rollout(model_folder, data_folder, trajectory,
