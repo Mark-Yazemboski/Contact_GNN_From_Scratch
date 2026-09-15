@@ -57,9 +57,9 @@ SEED_INDEX = 1
 # them here gives both architectures equal training at every point. If you
 # change the budget, change it for both arms or the comparison is not paired.
 Epochs_BY_N_TRAIN = {
-    4:     60_000,
-    16:   60_000,
-    64:   20,
+    4:     60000,
+    16:   60000,
+    64:   38000,
     128:  20000,
     256:  10000,
 }
@@ -122,7 +122,10 @@ accumulation_steps = 1
 learning_rate = 1e-4
 noise_scale = 3e-4 * BLOCK_HALF_WIDTH
 
-multistep = 1                 # 1 = single-step, the Allen et al. setting
+multistep = 1                 # 1 = single-step (Allen et al.);
+                              # 4 = matches the force arm, isolating
+                              # what the force architecture adds on top
+                              # of multistep unrolling
 impact_weight = 1
 Learning_Rate_Scheduler = None
 curriculum_epochs = 100
@@ -161,6 +164,12 @@ print(f"               ~{steps_per_epoch} steps/epoch  ->  {epochs:,} epochs")
 
 epoch_checkpoint_interval = 100
 validation_check_interval = 10
+
+# Rotate the _epoch<N>.pt checkpoints instead of keeping every one. Each
+# carries model AND optimizer state; at 60,000 epochs and interval 100
+# that is 600 files per run, which is what filled the account. 0 or None
+# restores the old keep-everything behaviour.
+keep_last_n_checkpoints = 2
 
 
 # ======================================================================
@@ -222,6 +231,7 @@ if Train:
         resume_checkpoint_path=resume_training_checkpoint_path,
         epoch_checkpoint_interval=epoch_checkpoint_interval,
         validation_check_interval=validation_check_interval,
+        keep_last_n_checkpoints=keep_last_n_checkpoints,
         noise_scale=noise_scale,
         multistep=multistep,
         latent_dim=Latent_dimension,

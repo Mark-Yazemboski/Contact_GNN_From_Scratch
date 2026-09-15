@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +13,37 @@ import time
 import math
 
 BLOCK_WIDTH_FOR_LOSS = 2 * 0.0524
+
+
+def prune_old_checkpoints(save_model_path, keep_last_n):
+    """Delete rotating '<stem>_epoch<N>.pt' checkpoints beyond the newest
+    `keep_last_n`. A 60k-epoch run at interval 100 otherwise leaves 600 files,
+    each carrying model AND optimizer state - this is what filled 80 GB.
+
+    Touches ONLY files matching the _epoch<digits>.pt pattern. _best_model.pt,
+    _final.pt, _norms.pt and _loss_history.pt are never candidates, so nothing
+    evaluation needs can be pruned by accident.
+    keep_last_n <= 0 disables pruning and restores the old behaviour.
+    """
+    if keep_last_n is None or keep_last_n <= 0:
+        return
+    stem = os.path.splitext(save_model_path)[0]
+    folder = os.path.dirname(stem) or "."
+    base = os.path.basename(stem)
+    pattern = re.compile(r"^" + re.escape(base) + r"_epoch(\d+)\.pt$")
+
+    found = []
+    for fn in os.listdir(folder):
+        m = pattern.match(fn)
+        if m:
+            found.append((int(m.group(1)), os.path.join(folder, fn)))
+    found.sort()                                   # oldest epoch first
+    for _, path in found[:-keep_last_n]:
+        try:
+            os.remove(path)
+        except OSError as e:
+            print(f"  (could not remove {os.path.basename(path)}: {e})")
+
 
 def _triton_available():
     try:
@@ -618,6 +650,7 @@ def train_gnn(Wall,
               copy_weights_only_path = None,
               resume_checkpoint_path=None,
               epoch_checkpoint_interval=500,
+              keep_last_n_checkpoints=2,   # rotate; 0/None = keep every one
               validation_check_interval=20,
               noise_scale=3e-4,
               multistep = 1,
@@ -1046,7 +1079,10 @@ def train_gnn(Wall,
                 },
                 checkpoint_path,
             )
-            print(f"Checkpoint saved to {checkpoint_path}")
+            prune_old_checkpoints(save_model_path, keep_last_n_checkpoints)
+            kept = ("all" if not keep_last_n_checkpoints
+                    else f"last {keep_last_n_checkpoints}")
+            print(f"Checkpoint saved to {checkpoint_path}  (keeping {kept})")
 
 
 
