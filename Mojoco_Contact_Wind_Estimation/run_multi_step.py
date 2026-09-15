@@ -50,7 +50,7 @@ RUN_NAME = "Paper_Arc_256_train_1"      # CHANGE PER RUN
 # Sample-efficiency sweep: how many training trajectories, and which seed.
 N_TRAIN = 64                            # 4 / 16 / 64 / 128 / 256
 train_start = 64
-# SEED_INDEX = 1                           # 0, 1, 2  -> three different subsets
+SEED_INDEX = 1                           
 
 # Optimizer-step budget per sweep point. These are the totals the FORCE arm
 # actually reached (read out of metrics.total_optimizer_steps), so matching
@@ -59,7 +59,7 @@ train_start = 64
 Epochs_BY_N_TRAIN = {
     4:     60_000,
     16:   60_000,
-    64:   38000,
+    64:   20,
     128:  20000,
     256:  10000,
 }
@@ -370,7 +370,6 @@ if Save_run_report:
         architecture="accel",          # <- how you tell these rows from force rows
         dataset=trajectory_folder,
         n_train=N_TRAIN,
-        seed_index=SEED_INDEX,
         train_range=f"{train_range.start}-{train_range.stop}",
         val_range=f"{val_range.start}-{val_range.stop}",
         test_range=f"{test_range.start}-{test_range.stop}",
@@ -381,13 +380,10 @@ if Save_run_report:
         latent_dim=Latent_dimension,
         pos_history=pos_history,
         batch_size=batch_size,
-        accumulation_steps=accumulation_steps,
         learning_rate=learning_rate,
-        target_steps=TARGET_STEPS,
         epochs=epochs,
         noise_scale=noise_scale,
         multistep=multistep,
-        impact_weight=impact_weight,
         scheduler=Learning_Rate_Scheduler,
         curriculum_epochs=curriculum_epochs,
         use_wind=use_wind_feature,
