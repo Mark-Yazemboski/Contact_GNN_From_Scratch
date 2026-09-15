@@ -23,6 +23,7 @@ import sys
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 
 from _common import (load, select, summarize, report, leftovers, save,
                      CSV_DEFAULT, INK, GRAY, ORANGE, RED, PURPLE)
@@ -30,7 +31,7 @@ from _common import (load, select, summarize, report, leftovers, save,
 
 # What we plot on the y axis.
 METRIC = "metrics.center_error"
-Y_LABEL = "rollout centre error  (block widths)"
+Y_LABEL = "rollout position error  (% of cube width)"
 
 
 # ======================================================================
@@ -93,7 +94,7 @@ def main(csv=CSV_DEFAULT):
           f"({candidates['group'].nunique()} groups)")
 
     fig, ax = plt.subplots(figsize=(7.4, 5.0))
-    claimed = []
+    drawn, claimed = [], []
 
     for arm in ARMS:
         runs = select(candidates, arm["criteria"], label=arm["label"])
@@ -102,9 +103,12 @@ def main(csv=CSV_DEFAULT):
             continue
 
         claimed.extend(runs.index.tolist())
-
         table = summarize(runs, "wind_max", METRIC)
-        report(table, "wind_max", metric_label="centre error")
+        report(table, "wind_max", metric_label="position error")
+        table = table.copy()
+        table["mean"] *= 100
+        table["std"] *= 100
+        drawn.append((arm, table))
 
         ax.errorbar(table["wind_max"], table["mean"], yerr=table["std"],
                     marker=arm["marker"], ms=9, lw=2.2, capsize=5,
@@ -113,6 +117,7 @@ def main(csv=CSV_DEFAULT):
     leftovers(candidates, claimed)
 
     ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda value, _: f"{value:g}"))
     ax.set_xlabel("wind range in the dataset  (m/s)")
     ax.set_ylabel(Y_LABEL)
     ax.set_title("Wind ablation", fontweight="bold", loc="left")

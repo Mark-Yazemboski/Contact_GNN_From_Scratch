@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-CSV_DEFAULT = "Master_Data_CSV_9_14_26.csv"
+CSV_DEFAULT = "Master_Data_CSV_9_15_26.csv"
 OUTDIR = "figure_assets"
 
 # poster palette
