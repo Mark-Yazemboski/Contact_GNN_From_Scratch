@@ -1,232 +1,213 @@
-from random import random
-import torch
-import wall
-import Mojoco_Contact_Wind_Estimation.train_gnn_multi_step as train_gnn_multi_step
-import generate_node_states
-from Mojoco_Contact_Wind_Estimation.train_gnn_multi_step import GNSModel
-import display_results 
-import evaluate_metrics
-import random
+"""
+run_multi_step.py   —  entry point for the ACCELERATION (old) architecture.
+
+Updated to log into the same master CSV as the force pipeline so the two
+architectures can be compared in one place.
+
+WHAT CHANGED, and why
+  1. save_run_report() was called WITHOUT run_name / master_csv, so rows never
+     reached all_force_runs_master.csv. Both are passed now, and settings
+     carries architecture="accel" so you can tell the rows apart.
+  2. train_range / val_range were not recorded. For the sample-efficiency
+     sweep the training SUBSET is the thing that varies between runs, so it
+     has to be in the row or the provenance is gone.
+  3. `metrics` and `slopes` were used at the bottom but only assigned inside
+     `if display_stats:` / `if plot_phase_curves:`. Turning either off raised
+     NameError after a full training run. Both are initialised up front.
+  4. model_folder_path was hardcoded to models/Testing, so every run
+     overwrote the last one. It is derived from RUN_NAME now.
+
+Everything you don't need for the comparison (GIFs, augmentation previews,
+phase curves, loss curves) is off by default. Turn them back on below.
+
+SET RUN_NAME, N_TRAIN and SEED_INDEX, then run.
+"""
+
 import os
+import random
+
+import torch
+
+import wall
+import generate_node_states
+import evaluate_metrics
+import display_results
+import train_gnn_multi_step
+from train_gnn_multi_step import GNSModel
 from run_report import save_run_report
 
 torch.set_float32_matmul_precision('high')
-
-#This file is the same as run.py, except it has perameters specific to handel the wind data in the mojoco trajectories
-#print(f"CUDA available: {torch.cuda.is_available()}", flush=True)
-#print(f"Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}", flush=True)
-#print(f"Tensor device test: {torch.rand(3).cuda().device}", flush=True)
-
-# import torch_scatter
-# print(torch_scatter.__file__)
-# # Then test:
-# x = torch.randn(10, 4).cuda()
-# idx = torch.tensor([0,0,1,1,2,2,3,3,4,4]).cuda()
-# out = torch_scatter.scatter_add(x, idx, dim=0)
-# print(out.device)  # must say cuda:0
-
-
-#This function will take in the number of trajectories we are training on, and the 
-#number of optimizer steps we want to hit, and some other perameters, and calculate
-#how many epochs we need to train for.
-def compute_epochs(num_trajectories, target_steps, batch_size, accumulation_steps, traj_timesteps=100, history=2):
-    usable_per_traj = traj_timesteps - history - 1
-    total_samples = num_trajectories * usable_per_traj
-    num_batches = (total_samples + batch_size - 1) // batch_size  # ceil division
-    effective_accum = min(accumulation_steps, num_batches)
-    steps_per_epoch = num_batches // effective_accum
-    steps_per_epoch = max(steps_per_epoch, 1)
-    epochs = (target_steps + steps_per_epoch - 1) // steps_per_epoch
-    return epochs
-
-#This is the real blocks width from the paper. This is used to unnormalize the data that they provide in the trajectories,
-#And also create the node positions relitive to the COM data that they provide.
-BLOCK_HALF_WIDTH = 0.0524
-
-#Sets device to GPU if available, otherwise CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-#Makes the floor object
-Floor = wall.wall(center_position=(0,0,0), size=(2,2), normal=(0,0,1))
-
-#This is the total number of trajectories in the dataset. 
-Num_total_trajectories = 2048
-
-#This sets the percentage of trajectories to use for training, validation, and testing.
-training_percentage = 0.5
-validation_percentage = 0.3
-testing_percentage = 0.2
-
-#Calculates the number of trajectories to use for training, validation, and testing based 
-#on the total number and the percentages.
-Num_train_trajectories = int(training_percentage * Num_total_trajectories)  
-Num_validation_trajectories = int(validation_percentage * Num_total_trajectories)  
-Num_test_trajectories = int(testing_percentage * Num_total_trajectories)  
-
-#---------------------------------------------------------------------------------------------------------
-#This is the number of training trajectories to actually use.
-# Override for experiments with smaller training sets
-Used_Num_train_trajectories = 1024
-#---------------------------------------------------------------------------------------------------------
-
-#Get the directory of this script for relative path resolution
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-#This is the folder where the trajectory data is stored. 
-trajectory_folder = os.path.join(script_dir, "data/mojoco_paper_replica")  # Folder where the trajectory .pt files are stored
 
-#Calculates the ranges of trajectory indices to use for training, validation, and testing.
-train_range = range(0, Used_Num_train_trajectories)
-val_range   = range(Num_train_trajectories, Num_train_trajectories + Num_validation_trajectories)
-test_range  = range(Num_train_trajectories + Num_validation_trajectories, Num_total_trajectories-1)
+# ======================================================================
+# 1.  WHAT THIS RUN IS
+# ======================================================================
 
-print(f"Using {Used_Num_train_trajectories} out of {Num_train_trajectories} training trajectories.")
-print(f"Training range: {(train_range)}")
-print(f"Validation range: {(val_range)}")
-print(f"Test range: {(test_range)}")
+# Goes in the CSV as run_name, and names the model folder.
+RUN_NAME = "Paper_Arc_256_train_1"      # CHANGE PER RUN
+
+# Sample-efficiency sweep: how many training trajectories, and which seed.
+N_TRAIN = 64                            # 4 / 16 / 64 / 128 / 256
+train_start = 64
+# SEED_INDEX = 1                           # 0, 1, 2  -> three different subsets
+
+# Optimizer-step budget per sweep point. These are the totals the FORCE arm
+# actually reached (read out of metrics.total_optimizer_steps), so matching
+# them here gives both architectures equal training at every point. If you
+# change the budget, change it for both arms or the comparison is not paired.
+Epochs_BY_N_TRAIN = {
+    4:     60_000,
+    16:   60_000,
+    64:   38000,
+    128:  20000,
+    256:  10000,
+}
+# TARGET_STEPS = STEPS_BY_N_TRAIN.get(N_TRAIN, 490_150)
+
+MASTER_CSV = os.path.join(script_dir, "models", "all_force_runs_master.csv")
+model_folder_path = os.path.join(script_dir, "models", RUN_NAME)
+save_model_path = os.path.join(model_folder_path, f"{N_TRAIN}_train_gns_model.pt")
 
 
-#-----------------------------------------------------------------------------------------------------
+# ======================================================================
+# 2.  DATA
+# ======================================================================
 
-#Sets the number of nodes per edge. at 2 nodes per edge there is 8 nodes, each one at a corner of the cube.
+Floor = wall.wall(center_position=(0, 0, 0), size=(2, 2), normal=(0, 0, 1))
+trajectory_folder = os.path.join(script_dir, "data/tosses_processed")
+
+BLOCK_HALF_WIDTH = 0.0524
+Num_total_trajectories = 569
+
+Num_train_trajectories = int(0.5 * Num_total_trajectories)      # 284
+Num_validation_trajectories = int(0.3 * Num_total_trajectories)  # 170
+Num_test_trajectories = int(0.2 * Num_total_trajectories)
+
+# Each seed trains on a DIFFERENT subset, so the error bars include
+# training-subset variance and not just weight initialisation. Blocks are
+# disjoint where they fit; past that they overlap and the caption has to say so.
+
+train_range = range(train_start, train_start + N_TRAIN)
+val_range = range(Num_train_trajectories,
+                  Num_train_trajectories + Num_validation_trajectories)
+test_range = range(Num_train_trajectories + Num_validation_trajectories,
+                   Num_total_trajectories - 1)
+
+if train_range.stop > Num_train_trajectories:
+    raise SystemExit(
+        f"train_range {train_range.start}-{train_range.stop} runs past the "
+        f"training pool (0-{Num_train_trajectories}). Lower SEED_INDEX.")
+
+print(f"run          : {RUN_NAME}")
+print(f"train        : {N_TRAIN} trajectories, indices "
+      f"{train_range.start}-{train_range.stop}  ")
+print(f"val / test   : {val_range.start}-{val_range.stop} / "
+      f"{test_range.start}-{test_range.stop}")
+
+
+# ======================================================================
+# 3.  MODEL AND TRAINING
+# ======================================================================
+
 nodes_per_edge = 2
-
-#Sets the number of nearest neighbors to use for creating edges in the graph.
 K_nearest_neighbors = 3
-
-#Sets the number of message passing layers in the GNN, and the number of times to repeat the 
-#blocks of message passing layers.
 message_passing_layers = 5
 repeat_blocks = 1
-
-#This is the batch size for training.
-batch_size=1024
-
-#This is the learning rate for training the GNN.
-learning_rate = 1e-4
-
-#Noise scale for data augmentation. This is the standard deviation of the Gaussian noise added to the input positions
-# during training to help regularize the model and improve generalization.
-noise_scale = 3e-4*BLOCK_HALF_WIDTH
-
-#This is the total number of optimizer steps to train for. 
-steps = 50000
-
-#This is the number of timesteps in each trajectory. 
-traj_timesteps = 200
-
-#This is an important parameter that sets how many past positions the model can see when making
-#its predictions. Basically giving the model more past positions can give it information about
-#the velocity and acceleration of the nodes, which can help it make better predictions.
+Latent_dimension = 128
 pos_history = 3
 
-Latent_dimension = 128
-
-#This is the number of steps to rollout the model during training for the multi-step loss.
-multistep = 1
-impact_weight = 1
-Learning_Rate_Scheduler = "decay" #Options are "decay", "cosine", or None. If None, the learning rate will be constant.
-curriculum_epochs = 100 #number of epochs to linearly increase the rollout length from 1 to multistep.
-
-#The paper says it had a batch size of 64 on 8 gpus so to simulate the same effective batch size on a single GPU,
-# we use gradient accumulation over 8 steps.
+batch_size = 512
 accumulation_steps = 1
+learning_rate = 1e-4
+noise_scale = 3e-4 * BLOCK_HALF_WIDTH
 
-#Data loading options
-#Set to False for older PyTorch or datasets with object serialization
-weights_only_load = False
-#Set to False if your dataset is already unscaled, or True to apply unscale_position_velocity 
-unscale_trajectory_data = False
+multistep = 1                 # 1 = single-step, the Allen et al. setting
+impact_weight = 1
+Learning_Rate_Scheduler = None
+curriculum_epochs = 100
 
-#This will compute the number of epochs to train for based on the number of trajectories we
-# are using, the target number of optimizer steps, the batch size, and the accumulation steps.
-epochs = compute_epochs(Used_Num_train_trajectories, steps, batch_size, accumulation_steps, traj_timesteps=traj_timesteps, history=pos_history)
-print("Training for {} epochs".format(epochs))
+use_wind_feature = False      # real tosses have no wind
 
-#Sets how often the program will save a checkpoint of the model during training,
-# and how often it will check the validation loss.
+weights_only_load = True
+unscale_trajectory_data = True
+
+# !! CHECK THIS AGAINST YOUR DATA !!
+# compute_epochs() converts a step budget into epochs, and it needs the real
+# usable-samples-per-trajectory. The force runs imply about 98 usable samples
+# per trajectory on tosses_processed (25,096 samples over 256 trajectories),
+# which means traj_timesteps is near 102, NOT the 200 this file used to carry.
+# At 200 you get roughly half the epochs you asked for and silently miss the
+# step budget. Set it to whatever your trajectories actually are.
+traj_timesteps = 102
+
+
+def compute_epochs(num_trajectories, target_steps, batch_size,
+                   accumulation_steps, traj_timesteps=100, history=2):
+    usable_per_traj = traj_timesteps - history - 1
+    total_samples = num_trajectories * usable_per_traj
+    num_batches = (total_samples + batch_size - 1) // batch_size
+    effective_accum = min(accumulation_steps, num_batches)
+    steps_per_epoch = max(num_batches // effective_accum, 1)
+    return (target_steps + steps_per_epoch - 1) // steps_per_epoch
+
+
+# epochs = compute_epochs(N_TRAIN, TARGET_STEPS, batch_size, accumulation_steps,
+#                         traj_timesteps=traj_timesteps, history=pos_history)
+epochs = Epochs_BY_N_TRAIN[N_TRAIN]
+usable = traj_timesteps - pos_history - 1
+steps_per_epoch = max(((N_TRAIN * usable + batch_size - 1) // batch_size), 1)
+print(f"               ~{steps_per_epoch} steps/epoch  ->  {epochs:,} epochs")
+
 epoch_checkpoint_interval = 100
 validation_check_interval = 10
 
-#Sets which visuals you want to turn on.
-#Meshed cube shows the initial node positions and edges. 
-#Augmentation shows the effect of random rotations on the trajectories. 
-#Rollout shows the model's predictions when rolled out over a trajectory, with shape matching to the true positions at each step.
-display_loss_curves = True
-display_stats = True
+
+# ======================================================================
+# 4.  WHAT TO DO
+# ======================================================================
+
+Train = True
+Evaluate = True
+Save_run_report = True
+
+# Off by default: none of this is needed for the centre / angle / penetration
+# comparison, and the GIFs in particular cost real time on a compute node.
+display_loss_curves = False
 show_meshed_cube = False
 show_augmentation = False
-show_rollout = True
-plot_phase_curves = True
+show_rollout = False
+plot_phase_curves = False
 
-#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-#---------------------------------------------------------------------------------------------------------
-#This adds an extra name to the saved model and dataset files, which is useful for keeping track of different experiments when you are training multiple models with different parameters.
-extra_name = "" #CHANGE THIS---------------------------------------------------------------------------------------------------------
-#---------------------------------------------------------------------------------------------------------
-#!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-#TURNS ON AND OFF THE USE OF THE WIND FEATURE IN THE MODEL. 
-# If True, the wind vector will be included in the node features and the model will learn to use it to make predictions. 
-# If False, the wind vector will not be included in the node features and the model will not have access to that information.
-use_wind_feature = True
-
-#------------------------------------------------------------------------------------------------------
-#This turns on and off model training, so you can train the model once, and then turn it off and just 
-#run the visualizations without having to retrain the model every time you run the code.
-Train = True
-#------------------------------------------------------------------------------------------------------
-model_folder_path = os.path.join(script_dir, f"models/Testing")
-#Model save/load settings.
-# save_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model.pt")
-save_model_path = os.path.join(model_folder_path, f"{Used_Num_train_trajectories}_train_gns_model.pt")
-
-
-#Set False when resuming from an existing checkpoint to keep dataset and normalization consistent.
 rebuild_datasets = True
-
-#Set this to a checkpoint file (for example: models/gns_model_epoch500.pt) to resume training.
 resume_training_checkpoint_path = None
-# resume_training_checkpoint_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned_wind_singlestep/{Used_Num_train_trajectories}_train_gns_model_epoch900.pt")
-
-#This will just load the model weights from the model location, but will not load the optimizer state or training epoch information.
-#This is useful if we want to use the initialization from a pretrained model, but we want to train it with different training 
-#parameters.
 copy_weights_only_path = None
-# copy_weights_only_path = os.path.join(script_dir, f"models/mojoco_no_wind_1024_train_Finetuned_wind_singlestep/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+inference_model_path = os.path.join(
+    model_folder_path, f"{N_TRAIN}_train_gns_model_best_model.pt")
 
 
-#Set this to a checkpoint file or model file to load for inference.
-#If None, the script will load the final model saved after training.
-# inference_model_path = None
-inference_model_path = os.path.join(model_folder_path, f"{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
+# ======================================================================
+# 5.  TRAIN
+# ======================================================================
 
-# inference_model_path = os.path.join(script_dir, f"models/mojoco_{Used_Num_train_trajectories}_train{extra_name}/{Used_Num_train_trajectories}_train_gns_model_best_model.pt")
-
-#Trains the GNN model
 if Train:
-
-    #Makes sure if we are resuming from a checkpoint, we don't accidentally rebuild the
-    # datasets, which would lead to inconsistent training since the model would be trained
-    # on different data than it was originally trained on before the checkpoint.
     if resume_training_checkpoint_path is not None and rebuild_datasets:
-        print("Resume checkpoint detected. Forcing rebuild_datasets=False for consistent continuation.")
+        print("Resume checkpoint detected. Forcing rebuild_datasets=False.")
         rebuild_datasets = False
 
-    #Trains the Gnn using parameters like the floor object, number of trajectories, 
-    # where to save the datasets and model, whether to rebuild the datasets,
-    # training epochs, batch size, learning rate, and GNN architecture parameters
-    # like nodes per edge and message passing layers.
+    os.makedirs(model_folder_path, exist_ok=True)
     train_gnn_multi_step.train_gnn(
-        Floor, 
+        Floor,
         train_range=train_range,
         val_range=val_range,
-        save_train_dataset_path=os.path.join(script_dir, "data/pytorch_datasets/gns_train_dataset.pt"),
-        save_val_dataset_path=os.path.join(script_dir, "data/pytorch_datasets/gns_val_dataset.pt"),
+        save_train_dataset_path=os.path.join(
+            script_dir, "data/pytorch_datasets/gns_train_dataset.pt"),
+        save_val_dataset_path=os.path.join(
+            script_dir, "data/pytorch_datasets/gns_val_dataset.pt"),
         save_model_path=save_model_path,
         rebuild_datasets=rebuild_datasets,
-        epochs=epochs, 
-        batch_size=batch_size, 
+        epochs=epochs,
+        batch_size=batch_size,
         accumulation_steps=accumulation_steps,
         lr=learning_rate,
         trajectory_folder=trajectory_folder,
@@ -234,206 +215,185 @@ if Train:
         unscale_data=unscale_trajectory_data,
         nodes_per_edge=nodes_per_edge,
         nearest_neighbors=K_nearest_neighbors,
-        h = pos_history,
+        h=pos_history,
         message_passing_layers=message_passing_layers,
         repeat_blocks=repeat_blocks,
         copy_weights_only_path=copy_weights_only_path,
         resume_checkpoint_path=resume_training_checkpoint_path,
         epoch_checkpoint_interval=epoch_checkpoint_interval,
-        validation_check_interval = validation_check_interval,
-        noise_scale = noise_scale,
+        validation_check_interval=validation_check_interval,
+        noise_scale=noise_scale,
         multistep=multistep,
         latent_dim=Latent_dimension,
-        use_rollout_validation = True,
+        use_rollout_validation=True,
         use_wind=use_wind_feature,
-        impact_weight = impact_weight,
-        Learning_Rate_Scheduler = Learning_Rate_Scheduler,
-        curriculum_epochs = curriculum_epochs
+        impact_weight=impact_weight,
+        Learning_Rate_Scheduler=Learning_Rate_Scheduler,
+        curriculum_epochs=curriculum_epochs,
     )
 
 
+# ======================================================================
+# 6.  LOAD THE TRAINED MODEL
+# ======================================================================
 
-#Generates the node features, edge features, edge indices, and true positions for the first trajectory in the dataset.
-#This is used to get the dimensions of the node and edge features, which are needed to initialize the GNN model.
-node_feat, edge_feat, edge_index, true_positions = generate_node_states.get_gns_features(
-    Floor,
-    throw_number=0,
-    nodes_per_edge=nodes_per_edge,
-    nearest_neighbors=K_nearest_neighbors,
-    data_folder=trajectory_folder,
-    weights_only=weights_only_load,
-    unscale_data=unscale_trajectory_data,
-    h = pos_history, use_wind=use_wind_feature
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+node_feat, edge_feat, edge_index, _ = generate_node_states.get_gns_features(
+    Floor, throw_number=0, nodes_per_edge=nodes_per_edge,
+    nearest_neighbors=K_nearest_neighbors, data_folder=trajectory_folder,
+    weights_only=weights_only_load, unscale_data=unscale_trajectory_data,
+    h=pos_history, use_wind=use_wind_feature)
 node_dim = node_feat.shape[2]
 edge_dim = edge_feat.shape[2]
 
-#This generates the initial node positions for the meshed cube, which are used for the visualizations.
 nodes_body = torch.tensor(
-        generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH*2, nodes_per_edge),
-        dtype=torch.float32
-    )
+    generate_node_states.mesh_cube_surface(BLOCK_HALF_WIDTH * 2, nodes_per_edge),
+    dtype=torch.float32)
 
-#Loads the trained GNN model from the saved file, and sets it to evaluation mode. 
-#This model will be used for the rollouts and visualizations later in the code.
-model = GNSModel(node_dim, edge_dim, latent_dim=Latent_dimension, L=message_passing_layers, K=repeat_blocks)
+model = GNSModel(node_dim, edge_dim, latent_dim=Latent_dimension,
+                 L=message_passing_layers, K=repeat_blocks)
 
-#Checks to see if we specified a model to load for inference. If not, it 
-#loads the best model saved during training.
-if inference_model_path is None:
-    load_model_path = os.path.splitext(save_model_path)[0] + "_best_model.pt"
-else:
-    load_model_path = inference_model_path
-
+load_model_path = inference_model_path or (
+    os.path.splitext(save_model_path)[0] + "_best_model.pt")
 print(f"Loading model from {load_model_path} for evaluation")
 
-#loads the model state dict from the specified path. The code checks if the loaded object
-#is a dictionary containing a "model_state_dict" key, which is a common format for saving 
-#checkpoints that include additional information like optimizer state and training epoch. 
 loaded_obj = torch.load(load_model_path, map_location=device)
+if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
+    loaded_obj = loaded_obj["model_state_dict"]
 if any(k.startswith('_orig_mod.') for k in loaded_obj.keys()):
     loaded_obj = {k.replace('_orig_mod.', '', 1): v for k, v in loaded_obj.items()}
 model.load_state_dict(loaded_obj)
+model.to(device).eval()
 
-#Moves the model to the GPU for faster computations.
-model.to(device)
-
-#Sets the model to evaluation mode, which is important for certain layers 
-#like dropout and batch normalization that behave differently during training and evaluation.
-model.eval()
-
-#This loads the normalization statistics that were used to normalize the data during training.
-
-norm_stats_path = os.path.splitext(save_model_path)[0] + "_norms.pt"
-norm_stats = torch.load(norm_stats_path, map_location=device)
-x_mean = norm_stats["x_mean"]
-x_std = norm_stats["x_std"]
-e_mean = norm_stats["e_mean"]
-e_std = norm_stats["e_std"]
-accel_std = norm_stats["acc_std"]
-accel_mean = norm_stats["acc_mean"]
-
-#Sets the loss history path
-loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
-train_loss_epochs = []
-train_loss_values = []
-val_loss_epochs = []
-val_loss_values = []
-
-#Loads the loss history from the specified path. This is used to plot the training and 
-#validation loss curves later in the code. 
-if os.path.exists(loss_history_path):
-    loss_history = torch.load(loss_history_path, map_location="cpu", weights_only=False)
-    train_loss_epochs = list(loss_history.get("train_loss_epochs", []))
-    train_loss_values = list(loss_history.get("train_loss_values", []))
-    val_loss_epochs = list(loss_history.get("val_loss_epochs", []))
-    val_loss_values = list(loss_history.get("val_loss_values", []))
-    print(f"Loaded loss history from {loss_history_path}")
-else:
-    print(f"Loss history file not found: {loss_history_path}")
+norm_stats = torch.load(os.path.splitext(save_model_path)[0] + "_norms.pt",
+                        map_location=device)
+x_mean, x_std = norm_stats["x_mean"], norm_stats["x_std"]
+e_mean, e_std = norm_stats["e_mean"], norm_stats["e_std"]
+accel_std, accel_mean = norm_stats["acc_std"], norm_stats["acc_mean"]
 
 
+# ======================================================================
+# 7.  EVALUATE   (centre / angle / penetration)
+# ======================================================================
+
+# Initialised up front. These used to be assigned only inside the optional
+# blocks below, so turning a flag off raised NameError after a full run.
+metrics = {}
+slopes = []
+
+if Evaluate:
+    print("\n" + "#" * 70)
+    print("# EVALUATION")
+    print("#" * 70)
+    metrics = evaluate_metrics.evaluate_model(
+        trajectory_folder, model, Floor, test_range, nodes_per_edge,
+        K_nearest_neighbors, nodes_body, accel_std, accel_mean,
+        x_mean, x_std, e_mean, e_std, weights_only_load,
+        unscale_trajectory_data, pos_history, use_wind=use_wind_feature)
+
+    if not isinstance(metrics, dict):
+        print(f"  !! evaluate_model returned {type(metrics).__name__}, "
+              f"not a dict — nothing to log")
+        metrics = {}
+    else:
+        print("\n  metrics being written to the CSV:")
+        for k, v in sorted(metrics.items()):
+            print(f"    {k:<28} {v:.6g}" if isinstance(v, (int, float))
+                  else f"    {k:<28} {v}")
 
 
+# ======================================================================
+# 8.  OPTIONAL EXTRAS  (all off by default)
+# ======================================================================
 
-
-#Shows the loss curve
 if display_loss_curves:
-    os.makedirs(os.path.join(script_dir, "Plots"), exist_ok=True)
-    print("Lowest validation loss: ", min(val_loss_values) if val_loss_values else "N/A")
-    display_results.plot_loss_curves(
-        train_loss_epochs=train_loss_epochs,
-        train_loss_values=train_loss_values,
-        val_loss_epochs=val_loss_epochs,
-        val_loss_values=val_loss_values,
-        title="Training and Validation Loss",
-        save_path=os.path.join(model_folder_path, "loss_curve.png"),
-        show_plot=True
-    )
+    loss_history_path = os.path.splitext(save_model_path)[0] + "_loss_history.pt"
+    if os.path.exists(loss_history_path):
+        hist = torch.load(loss_history_path, map_location="cpu", weights_only=False)
+        display_results.plot_loss_curves(
+            train_loss_epochs=list(hist.get("train_loss_epochs", [])),
+            train_loss_values=list(hist.get("train_loss_values", [])),
+            val_loss_epochs=list(hist.get("val_loss_epochs", [])),
+            val_loss_values=list(hist.get("val_loss_values", [])),
+            title="Training and Validation Loss",
+            save_path=os.path.join(model_folder_path, "loss_curve.png"),
+            show_plot=False)
+    else:
+        print(f"Loss history file not found: {loss_history_path}")
 
-#This evaluates the model on the test set and prints out various metrics like mean positon error, 
-#mean angle error, and mean penitration error
-if display_stats:
-    metrics = evaluate_metrics.evaluate_model(trajectory_folder, model, Floor, test_range, nodes_per_edge, K_nearest_neighbors, nodes_body, 
-                       accel_std, accel_mean, x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,pos_history, use_wind=use_wind_feature)
-
-
-
-#This will show the meshed cube with the initial node positions and edges,
-#which is useful for visualizing how the nodes are arranged on the cube and how the edges connect them.
 if show_meshed_cube:
     display_results.display_meshed_cube(nodes_body, edge_index=edge_index)
 
-
-#This will show the effect of random rotations on the trajectories, 
-#which is a common data augmentation technique used in training GNNs for physical systems.
-#This is usefull in detemrining if the augmentation is working properly, 
-#and also gives a visual intuition for how the trajectories change with different rotations.
 if show_augmentation:
     throw_number = random.choice(test_range)
-    print("Showing augmentation for trajectory number: ", throw_number)
     display_results.animate_augmented_data(
-        Floor,
-        throw_number=throw_number,
+        Floor, throw_number=throw_number,
         save_path=os.path.join(model_folder_path, "augmented_data.gif"),
-        nodes_per_edge=nodes_per_edge,
-        nearest_neighbors=K_nearest_neighbors,
-    )
+        nodes_per_edge=nodes_per_edge, nearest_neighbors=K_nearest_neighbors)
 
 if plot_phase_curves:
     slopes = evaluate_metrics.plot_phase_error_curves(
         trajectory_folder, model, Floor, test_range, nodes_per_edge,
         K_nearest_neighbors, nodes_body, accel_std, accel_mean,
-        x_mean, x_std, e_mean, e_std, weights_only_load, unscale_trajectory_data,
-        pos_history, use_wind=use_wind_feature,
+        x_mean, x_std, e_mean, e_std, weights_only_load,
+        unscale_trajectory_data, pos_history, use_wind=use_wind_feature,
         zero_at_phase_start=True,
-        save_path=os.path.join(model_folder_path, "phase_error_curves.png"),
-    )
+        save_path=os.path.join(model_folder_path, "phase_error_curves.png"))
 
-
-#This will show the model's predictions when rolled out over a trajectory,
-#with shape matching to the true positions at each step.
 if show_rollout:
-
     throw_number = random.choice(test_range)
-    print("Showing rollout for trajectory number: ", throw_number)
-    pred_positions, true_positions, edge_info = display_results.rollout_trajectory_feedback_shape_match(
-        trajectory_folder=trajectory_folder,
-        model=model,
-        Wall=Floor,
-        throw_number=throw_number,
-        nodes_per_edge=nodes_per_edge,
-        nearest_neighbors=K_nearest_neighbors,
-        rest_positions=nodes_body,
-        accel_std=accel_std,
-        accel_mean=accel_mean,
-        x_mean=x_mean,
-        x_std=x_std,
-        e_mean=e_mean,
-        e_std=e_std,
-        do_shape_match=True,
-        shape_alpha= 1.0,
-        return_edge_info=True,
-        weights_only_load=weights_only_load,
-        unscale_trajectory_data=unscale_trajectory_data,
-        h = pos_history,
-        use_wind = use_wind_feature
-        
-    )  
+    print("Showing rollout for trajectory number:", throw_number)
+    pred_positions, true_positions, edge_info = \
+        display_results.rollout_trajectory_feedback_shape_match(
+            trajectory_folder=trajectory_folder, model=model, Wall=Floor,
+            throw_number=throw_number, nodes_per_edge=nodes_per_edge,
+            nearest_neighbors=K_nearest_neighbors, rest_positions=nodes_body,
+            accel_std=accel_std, accel_mean=accel_mean, x_mean=x_mean,
+            x_std=x_std, e_mean=e_mean, e_std=e_std, do_shape_match=True,
+            shape_alpha=1.0, return_edge_info=True,
+            weights_only_load=weights_only_load,
+            unscale_trajectory_data=unscale_trajectory_data,
+            h=pos_history, use_wind=use_wind_feature)
     evaluate_metrics.compute_metrics(pred_positions, true_positions, nodes_body)
     display_results.animate_cube(
-        pred_positions,
-        true_positions,
-        edge_info=edge_info,
-        save_path=os.path.join(model_folder_path, "rollout_trajectory.gif"),
-    )
+        pred_positions, true_positions, edge_info=edge_info,
+        save_path=os.path.join(model_folder_path, "rollout_trajectory.gif"))
 
-settings = dict(
-dataset=trajectory_folder, n_train=Used_Num_train_trajectories,
-test_range=str(test_range), steps=steps, batch_size=batch_size, lr=learning_rate,
-multistep=multistep, impact_weight=impact_weight,
-scheduler=Learning_Rate_Scheduler, noise_scale=noise_scale,
-h=pos_history, use_wind=use_wind_feature,
-)
-save_run_report(os.path.dirname(save_model_path), settings, metrics, slopes)
+
+# ======================================================================
+# 9.  WRITE THE ROW
+# ======================================================================
+
+if Save_run_report:
+    settings = dict(
+        architecture="accel",          # <- how you tell these rows from force rows
+        dataset=trajectory_folder,
+        n_train=N_TRAIN,
+        seed_index=SEED_INDEX,
+        train_range=f"{train_range.start}-{train_range.stop}",
+        val_range=f"{val_range.start}-{val_range.stop}",
+        test_range=f"{test_range.start}-{test_range.stop}",
+        nodes_per_edge=nodes_per_edge,
+        nearest_neighbors=K_nearest_neighbors,
+        message_passing_layers=message_passing_layers,
+        repeat_blocks=repeat_blocks,
+        latent_dim=Latent_dimension,
+        pos_history=pos_history,
+        batch_size=batch_size,
+        accumulation_steps=accumulation_steps,
+        learning_rate=learning_rate,
+        target_steps=TARGET_STEPS,
+        epochs=epochs,
+        noise_scale=noise_scale,
+        multistep=multistep,
+        impact_weight=impact_weight,
+        scheduler=Learning_Rate_Scheduler,
+        curriculum_epochs=curriculum_epochs,
+        use_wind=use_wind_feature,
+    )
+    save_run_report(model_folder_path, settings, metrics, slopes,
+                    run_name=RUN_NAME, master_csv=MASTER_CSV)
+    print(f"\n  row appended to {MASTER_CSV}")
+
+print("\nAll done.")
