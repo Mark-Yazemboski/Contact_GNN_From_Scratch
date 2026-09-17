@@ -69,6 +69,16 @@ def main():
     p.add_argument("--mg-widths", type=float, default=1.0,
                    help="a force of m*g draws this many block-widths long")
 
+    p.add_argument("--arrow-mode", default="log", choices=("log", "clip", "linear"),
+                   help="log: compresses big forces so impacts and friction "
+                        "are both legible (default). clip: linear then capped. "
+                        "linear: physically proportional, impacts leave frame.")
+    p.add_argument("--max-arrow", type=float, default=2.2,
+                   help="cap in block-widths, used by --arrow-mode clip")
+    p.add_argument("--zoom", type=float, default=1.13,
+                   help=">1 pulls the camera in; 1.13 is ~13%% closer")
+    p.add_argument("--slide-nodes", type=int, default=4,
+                   help="loaded nodes required in the sliding frame")
     p.add_argument("--elev", type=float, default=18.0)
     p.add_argument("--azim", type=float, default=-62.0)
     p.add_argument("--checkpoint", default="best", choices=("best", "final"))
@@ -106,6 +116,10 @@ def main():
         frame_clean=not a.keep_labels,
         elev=a.elev,
         azim=a.azim,
+        arrow_mode=a.arrow_mode,
+        max_arrow_widths=a.max_arrow,
+        zoom=a.zoom,
+        slide_min_nodes=a.slide_nodes,
         make_gif=not a.no_gif,
     )
 

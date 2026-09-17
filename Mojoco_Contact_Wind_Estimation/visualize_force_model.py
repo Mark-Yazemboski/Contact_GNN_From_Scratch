@@ -48,7 +48,8 @@ from generate_node_states import mesh_cube_surface, knn_adjacency, BLOCK_HALF_WI
 # ======================================================================
 # ADDED: pick the frames that are worth a panel
 # ======================================================================
-def auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle, n_panels=6):
+def auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle, n_panels=6,
+                min_active=4, min_frac=0.02):
     """Choose frames by EVENT rather than by even spacing.
 
     Forces only exist for frames h .. h + n_steps - 1. Frame L-1 usually has NO
@@ -57,9 +58,15 @@ def auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle, n_panels=6):
     shows normal forces at rest. Everything below is clamped into the valid
     range so every exported panel has forces.
     """
-    Fn = np.linalg.norm(f_norm.numpy().sum(axis=1), axis=-1) / MG   # (n_steps,) in m g
+    fn_nodes = f_norm.numpy()                       # (n_steps, N, 3)
+    Fn = np.linalg.norm(fn_nodes.sum(axis=1), axis=-1) / MG   # summed, in m g
     Ft = np.linalg.norm(f_tang.numpy().sum(axis=1), axis=-1) / MG
     n_steps = len(Fn)
+
+    # How many nodes are actually loaded in each step. A sliding panel that
+    # catches a micro-bump with two corners loaded reads as a bad prediction;
+    # we want a frame where the cube is flat on its face.
+    n_active = (np.linalg.norm(fn_nodes, axis=-1) > min_frac * MG).sum(axis=1)
 
     first_forced = h                       # earliest frame that has forces
     last_forced = h + n_steps - 1          # latest frame that has forces
@@ -91,16 +98,29 @@ def auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle, n_panels=6):
             picks.append((1, f"impact {e_i + 1} peak",
                           to_frame(start + int(np.argmax(seg)))))
 
-    # SLIDING: midway between the second contact and settling. This is the
-    # phase where friction is doing the work and the cube is still moving.
+    # SLIDING: inside the window between the second contact and settling,
+    # pick the frame with the MOST loaded nodes (ties broken toward the
+    # middle of the window, and toward larger friction). Taking the midpoint
+    # blindly often lands on a micro-bump with only two corners in contact.
     if len(edges) >= 2:
-        second_contact = to_frame(int(edges[1]))
-        slide_end = clamp(t_settle)
-        if slide_end > second_contact + 1:
-            picks.append((1, "sliding",
-                          clamp((second_contact + slide_end) // 2)))
-    elif t_settle > t_contact + 2:                   # only one impact: use it
-        picks.append((1, "sliding", clamp((clamp(t_contact) + clamp(t_settle)) // 2)))
+        lo_k, hi_k = int(edges[1]), int(np.clip(t_settle - h, 0, n_steps - 1))
+    else:
+        lo_k, hi_k = (int(np.clip(t_contact - h, 0, n_steps - 1)),
+                      int(np.clip(t_settle - h, 0, n_steps - 1)))
+
+    if hi_k > lo_k + 1:
+        ks = np.arange(lo_k, hi_k)
+        mid = (lo_k + hi_k) / 2.0
+        best = n_active[ks].max()
+        if best < min_active:
+            print(f"    (sliding: only {best} nodes ever loaded in the slide "
+                  f"window, wanted {min_active})")
+        ok = ks[n_active[ks] >= min(min_active, best)]
+        # among qualifying frames prefer strong friction, then centrality
+        score = Ft[ok] - 0.002 * np.abs(ok - mid)
+        k_slide = int(ok[int(np.argmax(score))])
+        picks.append((1, "sliding", to_frame(k_slide)))
+        print(f"    (sliding frame has {n_active[k_slide]} loaded nodes)")
 
     if Ft.size:
         picks.append((2, "max friction", to_frame(int(np.argmax(Ft)))))
@@ -137,7 +157,13 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
                             # --- ADDED: vector frame export for the poster ---
                             save_frames=None, n_panels=6, frame_dir=None,
                             frame_format="pdf", frame_clean=True,
-                            elev=18, azim=-62, make_gif=True):
+                            elev=18, azim=-62, make_gif=True,
+                            # --- ADDED: arrow length mapping ---
+                            arrow_mode="log", max_arrow_widths=2.2,
+                            # --- ADDED: camera zoom, >1 is closer ---
+                            zoom=1.13,
+                            # --- ADDED: sliding frame node requirement ---
+                            slide_min_nodes=4):
     """Roll out ONE trajectory and animate it with per-node contact-force
     arrows (normal + tangential) and a COM fluid-force arrow. Returns the path
     of the saved GIF. show=False is the default so this is safe to call from a
@@ -233,6 +259,36 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
     # ======================================================================
     ARROW_SCALE = MG_ARROW_WIDTHS * BLOCK_WIDTH / MG      # meters of arrow per Newton
     MIN_F = MIN_ARROW_FRAC * MG
+    MAX_LEN = max_arrow_widths * BLOCK_WIDTH
+
+    def arrow_len(mag_N, gain):
+        """Newtons -> arrow length in metres.
+
+        "linear"  physical and honest: length is proportional to force, so a
+                  30 N impact draws 30x the 1 N friction and leaves the frame.
+        "log"     length = gain * MG_ARROW_WIDTHS * log1p(F/MG) / log(2), so a
+                  force of m*g still draws MG_ARROW_WIDTHS long and everything
+                  above it is compressed. Impact peaks and friction are both
+                  legible in one frame. Ordering is preserved, ratios are NOT -
+                  say "log-scaled arrow lengths" in the caption.
+        "clip"    linear up to max_arrow_widths, then held. Ratios are true
+                  below the cap and meaningless above it.
+        """
+        m = np.asarray(mag_N, dtype=float)
+        if arrow_mode == "linear":
+            return ARROW_SCALE * gain * m
+        if arrow_mode == "clip":
+            return np.minimum(ARROW_SCALE * gain * m, MAX_LEN)
+        # log
+        return (gain * MG_ARROW_WIDTHS * BLOCK_WIDTH
+                * np.log1p(m / MG) / np.log(2.0))
+
+    def scaled(vecs, gain):
+        """Rescale each vector to arrow_len() while keeping its direction."""
+        v = np.asarray(vecs, dtype=float)
+        mags = np.linalg.norm(v, axis=-1, keepdims=True)
+        want = arrow_len(mags[..., 0], gain)[..., None]
+        return v / np.maximum(mags, 1e-12) * want
 
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection='3d')
@@ -240,10 +296,19 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
     ei = edge_index.numpy()
     all_pos = torch.cat([pred, true], dim=0) if DRAW_GROUND_TRUTH else pred
     pad = 0.5 * BLOCK_WIDTH
-    ax.set_xlim(float(all_pos[:, :, 0].min()) - pad, float(all_pos[:, :, 0].max()) + pad)
-    ax.set_ylim(float(all_pos[:, :, 1].min()) - pad, float(all_pos[:, :, 1].max()) + pad)
-    ax.set_zlim(min(0.0, float(all_pos[:, :, 2].min())) - 0.2 * pad,
-                float(all_pos[:, :, 2].max()) + pad)
+    lims = [
+        (float(all_pos[:, :, 0].min()) - pad, float(all_pos[:, :, 0].max()) + pad),
+        (float(all_pos[:, :, 1].min()) - pad, float(all_pos[:, :, 1].max()) + pad),
+        (min(0.0, float(all_pos[:, :, 2].min())) - 0.2 * pad,
+         float(all_pos[:, :, 2].max()) + pad),
+    ]
+    # ADDED: zoom > 1 pulls the camera in by shrinking the view about its
+    # centre. 1.13 is about 13% closer. The floor stays put because the z
+    # range is shrunk about its own centre too, so raise `zoom` gently.
+    if zoom and zoom != 1.0:
+        lims = [(c - (hi - lo) / (2 * zoom), c + (hi - lo) / (2 * zoom))
+                for lo, hi in lims for c in [(lo + hi) / 2]]
+    ax.set_xlim(*lims[0]); ax.set_ylim(*lims[1]); ax.set_zlim(*lims[2])
     ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
 
     if DRAW_FLOOR:
@@ -314,18 +379,18 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
                 mags = np.linalg.norm(vecs, axis=1)
                 sel = mags > MIN_F
                 if sel.any():
-                    s = ARROW_SCALE * gain
+                    a = scaled(vecs[sel], gain)
                     quivers.append(ax.quiver(
                         p[sel, 0], p[sel, 1], p[sel, 2],
-                        vecs[sel, 0] * s, vecs[sel, 1] * s, vecs[sel, 2] * s,
+                        a[:, 0], a[:, 1], a[:, 2],
                         color=color, linewidth=2.4, arrow_length_ratio=0.25))
 
             com = p.mean(axis=0)
             if np.linalg.norm(ff) > MIN_F:
-                s = ARROW_SCALE * FLUID_GAIN
+                a = scaled(ff, FLUID_GAIN)
                 quivers.append(ax.quiver(
                     com[0], com[1], com[2],
-                    ff[0] * s, ff[1] * s, ff[2] * s,
+                    a[0], a[1], a[2],
                     color=C_FLUID, linewidth=2.2, arrow_length_ratio=0.25))
 
             n_active = int((np.linalg.norm(fn, axis=1) > MIN_F).sum())
@@ -359,7 +424,8 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
     if save_frames is not None:
         if isinstance(save_frames, str) and save_frames == "auto":
             idx = auto_frames(f_norm, f_tang, MG, h, L, t_contact, t_settle,
-                              n_panels=n_panels)
+                              n_panels=n_panels, min_active=slide_min_nodes,
+                              min_frac=MIN_ARROW_FRAC)
             print(f"  auto-selected frames: {idx}")
         else:
             idx = sorted({int(f) for f in save_frames if 0 <= int(f) < L})
