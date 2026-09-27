@@ -281,7 +281,7 @@ def visualize_force_rollout(model_folder, data_folder, trajectory,
             return np.minimum(ARROW_SCALE * gain * m, MAX_LEN)
         # log
         return (gain * MG_ARROW_WIDTHS * BLOCK_WIDTH
-                * np.log1p(m / MG) / np.log(2.0))
+                * np.log1p(m / MG ) / np.log(2.0))
 
     def scaled(vecs, gain):
         """Rescale each vector to arrow_len() while keeping its direction."""

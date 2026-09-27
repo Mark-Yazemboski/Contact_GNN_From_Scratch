@@ -34,7 +34,14 @@ STEPS = "metrics.total_optimizer_steps"
 MARK_STEP_LIMITED = False           # annotate points that ran short of budget
 COMBINED = False                    # also write the three-in-a-row version
 
-
+plt.rcParams.update({
+    "font.size": 18,
+    "axes.titlesize": 22,
+    "axes.labelsize": 18,
+    "legend.fontsize": 15,
+    "xtick.labelsize": 16,
+    "ytick.labelsize": 16,
+})
 # ----------------------------------------------------------------------
 # !! CHECK THIS BEFORE COMPARING TO THE PAPER !!
 #
@@ -57,7 +64,7 @@ WIDTH_SCALE = 100.0
 
 ARMS = [
     {
-        "label": "force architecture + multistep  (ours)",
+        "label": "force GNC + multistep (ours)",
         "color": ORANGE,
         "marker": "o",
         "criteria": {
@@ -69,7 +76,7 @@ ARMS = [
         },
     },
     {
-        "label": "acceleration GNS, single-step  (Allen et al. style)",
+        "label": "acceleration GNS, single-step",
         "color": GRAY,
         "marker": "s",
         "criteria": {
@@ -174,7 +181,7 @@ def draw_panel(ax, on_dataset, panel, show_legend=False):
     ax.set_ylabel(panel["ylabel"])
     ax.set_title(panel["title"], fontweight="bold", loc="left")
     if show_legend:
-        ax.legend(frameon=False, loc="upper right", fontsize=9)
+        ax.legend(frameon=False, loc="upper right")
 
 
 def report_step_budget(on_dataset):
@@ -208,8 +215,8 @@ def main(csv=CSV_DEFAULT):
         return
 
     # ---- one file per metric ----
-    for panel, stem in zip(PANELS, ("fig4_position", "fig4_rotation",
-                                    "fig4_penetration")):
+    for panel, stem in zip(PANELS, ("fig4_position_poster", "fig4_rotation_poster",
+                                    "fig4_penetration_poster")):
         fig, ax = plt.subplots(figsize=(6.4, 4.8))
         draw_panel(ax, on_dataset, panel, show_legend=True)
         ax.text(0.99, 0.015, "mean ± s.d. over 3 runs",
